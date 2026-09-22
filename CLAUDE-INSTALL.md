@@ -1,68 +1,68 @@
-# Инструкция для Claude Code: поставить Merxion Stat на эту машину
+# Instructions for Claude Code: install mx-stat on this machine
 
-Ты получил архив `MerxionStat-*.zip` — готовый инструмент, ничего писать с нуля не нужно.
-Задача: установить, проверить, показать пользователю, как запускать.
+You have the `mx-stat` repository — a finished tool, nothing needs to be written from scratch.
+Your job: install it, verify it, and tell the user how to run it.
 
-## Шаги
+## Steps
 
-1. **Распаковать и установить**
+1. **Install**
    ```sh
-   cd ~/Downloads && unzip -o MerxionStat-*.zip && cd MerxionStat
+   git clone https://github.com/merxion-io/mx-stat.git && cd mx-stat
    ./install.sh
    ```
-   Скрипт копирует код в `~/.local/share/MerxionStat`, создаёт venv (uv → иначе `python3 -m venv`),
-   ставит `textual`, `psutil`, `rich` из `requirements.txt` и пишет лаунчер `~/.local/bin/mx`.
-   Нужен Python 3.11+. Если его нет, а есть `uv` — он скачает нужный Python сам.
-   Если на машине осталась прошлая версия под именем `hstat`, install.sh сам удалит
-   `~/.local/bin/hstat` и `~/.local/share/hstat`.
+   The script copies the code to `~/.local/share/mx-stat`, creates a venv (uv, else
+   `python3 -m venv`), installs `textual`, `psutil`, `rich` from `requirements.txt` and
+   writes a launcher at `~/.local/bin/mx`. Requires Python 3.11+; if it is missing but `uv`
+   is present, uv will fetch a suitable Python itself.
+   If an earlier version is installed under the names `hstat` or `MerxionStat`, `install.sh`
+   removes it automatically.
 
-2. **Проверить PATH.** Если `install.sh` предупредил, что `~/.local/bin` не в PATH:
+2. **Check PATH.** If `install.sh` warned that `~/.local/bin` is not on PATH:
    ```sh
    echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
    ```
-   (или `~/.bashrc`, если оболочка bash). Новую строку не добавляй, если такая уже есть.
+   (or `~/.bashrc` for bash). Do not add the line if an equivalent one already exists.
 
-3. **Проверить без терминала** (TUI нельзя запускать из неинтерактивного Bash — он зависнет):
+3. **Verify without a terminal** (never launch the TUI from a non-interactive Bash — it hangs):
    ```sh
    mx stat -h
    COLUMNS=120 mx stat -s --no-color | head -40
-   ~/.local/share/MerxionStat/venv/bin/python tests/smoke_test.py 140 46
+   ~/.local/share/mx-stat/venv/bin/python tests/smoke_test.py 140 46
    ```
-   Первая команда печатает справку, вторая — статичный снимок со всеми секциями, третья
-   прощёлкивает все шесть вкладок headless и печатает `smoke test OK`. Если все три отработали
-   без traceback — установка рабочая.
+   The first prints help, the second a static snapshot with every section, the third clicks
+   through all six tabs headless and prints `smoke test OK`. If all three finish without a
+   traceback, the installation works.
 
-4. **Сказать пользователю**: запускать `mx stat` в терминале (лучше шириной 140+ колонок,
-   на 200+ таблица агентов показывает все колонки), `mx stat -s` для снимка. Клавиши перечислены
-   в `mx stat -h`.
+4. **Tell the user**: run `mx stat` in a terminal (140+ columns is better; at 200+ the agent
+   table shows every column), `mx stat -s` for a snapshot. Keys are listed in `mx stat -h`.
 
-## Что не делать
+## What not to do
 
-- Не запускай `mx stat` без флагов из своего Bash — это полноэкранный TUI, ему нужен TTY.
-- Не переписывай код «под себя» до того, как он запустился как есть. Сначала `install.sh`
-  и проверка, потом правки по просьбе пользователя.
-- Не ставь зависимости в системный Python — только venv, который создаёт `install.sh`.
+- Do not run `mx stat` without flags from your own Bash — it is a full-screen TUI and needs a TTY.
+- Do not rewrite the code "to taste" before it has run as-is. Run `install.sh` and verify first,
+  then make changes if the user asks.
+- Do not install dependencies into the system Python — only into the venv `install.sh` creates.
 
-## Если что-то пошло не так
+## If something goes wrong
 
-| Симптом | Что делать |
+| Symptom | What to do |
 |---|---|
-| `install.sh: не найден python3` | Поставить `uv` (`curl -LsSf https://astral.sh/uv/install.sh \| sh`) и повторить: uv скачает Python сам |
-| `mx stat -s` работает, агентов 0 | Нормально, если сейчас нет запущенных сессий Claude Code. Агенты появляются из `~/.claude/sessions/*.json` |
-| В TUI у агентов `…` вместо контекста первые секунды | Нормально: трекер транскриптов прогревается в фоне |
-| Всё на месте, но карточка КОНТЕЙНЕРЫ пустая | Нет ни `podman`, ни `docker`. Это опционально |
-| Пустые карточки ЭНЕРГИЯ / ТЕМПЕРАТУРА / вкладка «Видео» | Нет соответствующих датчиков: RAPL в `/sys/class/powercap`, hwmon, `nvidia-smi`. Не баг |
-| Не Linux | Это Linux-версия: mac-код вырезан, данные берутся из `/proc`, `/sys`, `/etc`. На других системах не запустится осмысленно |
+| `install.sh: python3 not found` | Install `uv` (`curl -LsSf https://astral.sh/uv/install.sh \| sh`) and retry: uv downloads Python itself |
+| `mx stat -s` works but shows 0 agents | Normal when no Claude Code sessions are running. Agents come from `~/.claude/sessions/*.json` |
+| Agents show `…` instead of context for the first few seconds | Normal: the transcript tracker is warming up in the background |
+| Everything works but the CONTAINERS card is empty | Neither `podman` nor `docker` is installed. That card is optional |
+| Empty POWER / TEMPERATURE cards, or an empty GPU tab | The corresponding sensors are absent: RAPL in `/sys/class/powercap`, hwmon, `nvidia-smi`. Not a bug |
+| Not Linux | This is the Linux build: the macOS code was removed and data comes from `/proc`, `/sys`, `/etc`. It will not run meaningfully elsewhere |
 
-## Где что лежит после установки
+## Layout after installation
 
 ```
-~/.local/bin/mx                       лаунчер (sh → venv python → mxstat.py)
-~/.local/share/MerxionStat/mxstat.py  точка входа
-~/.local/share/MerxionStat/core.py    данные + SessionTracker + логотип (LOGO/BRAND/WHITE)
-~/.local/share/MerxionStat/tui.py     Textual-приложение
-~/.local/share/MerxionStat/snapshot.py режим -s
-~/.local/share/MerxionStat/venv/      окружение
+~/.local/bin/mx                    launcher (sh → venv python → mxstat.py)
+~/.local/share/mx-stat/mxstat.py   entry point
+~/.local/share/mx-stat/core.py     data + SessionTracker + logo (LOGO/BRAND/WHITE)
+~/.local/share/mx-stat/tui.py      Textual application
+~/.local/share/mx-stat/snapshot.py the -s mode
+~/.local/share/mx-stat/venv/       environment
 ```
 
-Подробности про источники данных — в `README.md` рядом.
+See `README.md` for details on the data sources.

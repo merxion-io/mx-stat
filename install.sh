@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Установка Merxion Stat (MERXION) на этот компьютер.
 #
-#   ./install.sh                → ~/.local/share/MerxionStat + лаунчер ~/.local/bin/mx
+#   ./install.sh                → ~/.local/share/mx-stat + лаунчер ~/.local/bin/mx
 #   MXSTAT_HOME=… MXSTAT_BIN=…  → другие пути
 #
 # Нужен Python 3.11+ (venv создаётся через uv, если он есть, иначе python3 -m venv).
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEST="${MXSTAT_HOME:-$HOME/.local/share/MerxionStat}"
+DEST="${MXSTAT_HOME:-$HOME/.local/share/mx-stat}"
 BIN="${MXSTAT_BIN:-$HOME/.local/bin}"
 PYMIN="3.11"
 
@@ -63,17 +63,17 @@ say "Лаунчер: $BIN/mx"
 "$BIN/mx" stat -h >/dev/null || die "лаунчер не запускается"
 "$DEST/venv/bin/python" -c "import textual, psutil, rich; print('   textual', textual.__version__, '· psutil', psutil.__version__)"
 
-# ── уборка старой установки hstat ──
-OLD_DEST="$HOME/.local/share/hstat"
-OLD_BIN="$BIN/hstat"
-if [ -e "$OLD_BIN" ]; then
-    rm -f "$OLD_BIN"
-    say "Удалён старый лаунчер: $OLD_BIN"
+# ── уборка прежних установок (hstat, MerxionStat) ──
+if [ -e "$BIN/hstat" ]; then
+    rm -f "$BIN/hstat"
+    say "Удалён старый лаунчер: $BIN/hstat"
 fi
-if [ -d "$OLD_DEST" ] && [ "$OLD_DEST" != "$DEST" ]; then
-    rm -rf "$OLD_DEST"
-    say "Удалён старый каталог: $OLD_DEST"
-fi
+for OLD in "$HOME/.local/share/hstat" "$HOME/.local/share/MerxionStat"; do
+    if [ -d "$OLD" ] && [ "$OLD" != "$DEST" ]; then
+        rm -rf "$OLD"
+        say "Удалён старый каталог: $OLD"
+    fi
+done
 
 case ":$PATH:" in
     *":$BIN:"*) ;;

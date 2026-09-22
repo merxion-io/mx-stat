@@ -1,6 +1,6 @@
 """Headless-проверка Merxion Stat: запускает TUI без терминала, прощёлкивает вкладки и клавиши.
 
-    ~/.local/share/MerxionStat/venv/bin/python tests/smoke_test.py [ширина] [высота] [--show]
+    ~/.local/share/mx-stat/venv/bin/python tests/smoke_test.py [ширина] [высота] [--show]
 
 Без --show печатает только итог; с --show выводит текстовый слепок каждой вкладки.
 Код выхода 0 — всё отрисовалось без исключений."""
@@ -10,7 +10,7 @@ import os
 import re
 import sys
 
-MXSTAT_HOME = os.environ.get("MXSTAT_HOME", os.path.expanduser("~/.local/share/MerxionStat"))
+MXSTAT_HOME = os.environ.get("MXSTAT_HOME", os.path.expanduser("~/.local/share/mx-stat"))
 sys.path.insert(0, MXSTAT_HOME)
 
 import tui  # noqa: E402
@@ -34,7 +34,7 @@ def svg_to_text(svg: str) -> str:
 
 
 async def main(width: int, height: int, show: bool) -> int:
-    app = tui.MerxionStat()
+    app = tui.MxStat()
     async with app.run_test(size=(width, height)) as pilot:
         await asyncio.sleep(4.0)
         for tab in ("1", "2", "3", "4", "5", "6"):

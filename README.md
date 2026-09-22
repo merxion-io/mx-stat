@@ -1,104 +1,112 @@
-> **Linux-версия.** Оригинал писался под macOS; здесь mac-код вырезан целиком,
-> данные берутся из psutil, `/proc`, `/sys`, `/etc` и `ip`/`nmcli`/`podman`.
+# mx-stat — system & Claude Code agent monitor
 
-# Merxion Stat — монитор системы и AI-агентов Claude Code (MERXION)
+[Русская версия](README.ru.md) · MIT · Linux · Python 3.11+
 
-Полноэкранный live-монитор в терминале (Textual, тема tokyo-night) с белым логотипом
-MERXION в шапке. Кроме обычного «htop» показывает **живые сессии Claude Code**: что за
-задача, какая модель, сколько контекста съедено, когда сессия последний раз писала,
-сколько токенов за день, пульс ответов по минутам и гистограмма по часам.
+A full-screen terminal monitor (Textual, tokyo-night theme). Beyond the usual `htop` view
+it shows **live Claude Code sessions**: what each one is working on, which model, how much
+context is consumed, when it last wrote, tokens spent today, a per-minute response pulse
+and an hourly histogram.
 
 ```
-█▀▄▀█ █▀▀ █▀█ ▀▄▀ █ █▀█ █▄ █  │ AMD Ryzen 9 · Fedora 42 · ↑ 9д 21ч · Tue 08.09  11:42:21
-█ ▀ █ ██▄ █▀▄ ▄▀▄ █ █▄█ █ ▀█  │ CPU 24.3%  RAM 68%  load 2.49  ↓ 10 KB/с  ↑ 220 KB/с  🤖 5 busy 3 · 1с  ·  Stat
+█▀▄▀█ █▀▀ █▀█ ▀▄▀ █ █▀█ █▄ █  │ AMD Ryzen 9 · Fedora 42 · ↑ 9d 21h · Tue 08.09  11:42:21
+█ ▀ █ ██▄ █▀▄ ▄▀▄ █ █▄█ █ ▀█  │ CPU 24.3%  RAM 68%  load 2.49  ↓ 10 KB/s  ↑ 220 KB/s  🤖 5 busy 3 · 1s  ·  Stat
 ```
 
-## Установка
+> **Note:** the interface is currently in Russian. Documentation is bilingual; UI
+> localisation is not done yet — contributions welcome.
+
+## Install
 
 ```sh
-unzip MerxionStat-*.zip && cd MerxionStat
+git clone https://github.com/merxion-io/mx-stat.git && cd mx-stat
 ./install.sh
 mx stat            # TUI
-mx stat -s         # статичный снимок (для пайпов / скриншотов)
+mx stat -s         # one static snapshot (good for pipes / screenshots)
 ```
 
-`install.sh` кладёт код в `~/.local/share/MerxionStat`, создаёт там изолированный venv
-(через `uv`, если он есть, иначе `python3 -m venv`) и пишет лаунчер `~/.local/bin/mx`.
-Нужен Python 3.11+. Пути переопределяются переменными `MXSTAT_HOME` и `MXSTAT_BIN`.
-Команда `mx` — тонкая обёртка: сейчас она знает единственную подкоманду `stat`.
+`install.sh` copies the code to `~/.local/share/mx-stat`, creates an isolated venv there
+(via `uv` if available, otherwise `python3 -m venv`) and writes a launcher at
+`~/.local/bin/mx`. Requires Python 3.11+. Paths are overridable via `MXSTAT_HOME` and
+`MXSTAT_BIN`.
 
-Проверка без терминала (headless, прощёлкивает все вкладки):
+`mx` is a thin wrapper — right now it knows a single subcommand, `stat`.
+
+Headless check (clicks through every tab, no terminal needed):
 
 ```sh
-~/.local/share/MerxionStat/venv/bin/python tests/smoke_test.py 140 46 --show
+~/.local/share/mx-stat/venv/bin/python tests/smoke_test.py 140 46 --show
 ```
 
-## Что внутри
+## What's inside
 
-| Вкладка | Содержимое |
+| Tab | Contents |
 |---|---|
-| **1 Обзор** | Процессор таблицей (ядра колонками, USER/SYS, история по каждому ядру, P/E-кластеры, потоки, сисколлы, топ процессов), память с топом по RAM, питание/батарея, таблица агентов, токены за сегодня с пульсом, сеть, диск |
-| **2 Агенты** | Широкая таблица сессий (ветка, режим прав, тип cli/sdk, промпты, инструменты, токены), детали выбранной сессии (задача, последний запрос, effort, последний инструмент, кэш-хит), гистограмма выходных токенов по часам, 7 дней |
-| **3 Процессы** | Топ-60 процессов; `s` — сортировка по циклу CPU → память → потоки → возраст; `f` — только claude |
-| **4 Система** | Машина, ядро, загрузка, память, сеть, батарея; карточка Claude Code (версии, транскрипты, MCP); тома; контейнеры podman/docker |
-| **5 Сеть** | Маршрут, DNS, VPN-туннели, TCP по состояниям, скорость по каждому интерфейсу, открытые порты с процессом и назначением |
-| **1 Обзор** — карточка ⚡ ЭНЕРГИЯ | Живое потребление по узлам: CPU (счётчики RAPL), каждая видеокарта (nvidia-smi), встроенная графика (hwmon), сумма и график за ~3 минуты. Диски, ОЗУ, плата и БП не измеряются — датчиков нет |
-| **1 Обзор** — карточка 🌡 ТЕМПЕРАТУРА | Градусы по всем датчикам: CPU и его кристаллы (k10temp), каждая видеокарта, встроенная графика, сетевой чип; самый горячий узел и график за ~3 минуты. Температуры дисков нужен smartctl — их нет |
-| **6 Видео** | Видеокарты NVIDIA: загрузка и видеопамять с историей, температура, вентилятор, питание и частоты; таблица процессов, занимающих видеопамять |
+| **1 Overview** | CPU as a table (cores as columns, USER/SYS, per-core history, P/E clusters, threads, syscalls, top processes), memory with top RAM consumers, power/battery, agent table, today's tokens with a pulse, network, disk |
+| **2 Agents** | Wide session table (branch, permission mode, cli/sdk type, prompts, tools, tokens), details for the selected session (task, last request, effort, last tool, cache hit), hourly output-token histogram, 7 days |
+| **3 Processes** | Top 60 processes; `s` cycles sorting CPU → memory → threads → age; `f` filters to claude only |
+| **4 System** | Machine, kernel, load, memory, network, battery; Claude Code card (versions, transcripts, MCP); volumes; podman/docker containers |
+| **5 Network** | Route, DNS, VPN tunnels, TCP by state, per-interface throughput, listening ports with owning process |
+| **1 Overview** — ⚡ POWER card | Live draw per node: CPU (RAPL counters), each GPU (nvidia-smi), integrated graphics (hwmon), total and a ~3 minute graph. Disks, RAM, board and PSU are not measured — no sensors exist |
+| **1 Overview** — 🌡 TEMPERATURE card | Every sensor: CPU and its dies (k10temp), each GPU, integrated graphics, network chip; hottest node and a ~3 minute graph. Disk temperatures would need smartctl — not used |
+| **6 GPU** | NVIDIA cards: utilisation and VRAM with history, temperature, fan, power and clocks; table of processes holding VRAM |
 
-Клавиши: `1`–`6` вкладки · `p` пауза · `s` сортировка · `f` фильтр claude · `r` пересчитать ·
-`+`/`-` интервал (0.5–10 с) · `q` выход.
+Keys: `1`–`6` tabs · `p` pause · `s` sort · `f` claude filter · `r` refresh ·
+`+`/`-` interval (0.5–10 s) · `q` quit.
 
-## Откуда берутся данные об агентах
+## Where the agent data comes from
 
-Всё читается из файлов Claude Code, без API и без сети:
+Everything is read from Claude Code's own files — no API, no network:
 
-- **`~/.claude/sessions/<pid>.json`** — живые сессии: `sessionId`, `cwd`, `name`, `status`
+- **`~/.claude/sessions/<pid>.json`** — live sessions: `sessionId`, `cwd`, `name`, `status`
   (`idle`/`busy`/`shell`), `version`, `startedAt`, `entrypoint` (`cli` / `sdk-cli`).
-  Процесс проверяется через psutil: у Claude Code имя процесса — номер версии (`2.1.263`),
-  надёжный признак — путь `exe` внутри `~/.local/share/claude/versions/`.
-- **Транскрипт** `~/.claude/projects/<cwd с / и . → ->/<sessionId>.jsonl`:
-  - `{"type":"ai-title","aiTitle":…}` — название задачи (колонка ЗАДАЧА);
-  - `{"type":"last-prompt","lastPrompt":…}` — последний запрос пользователя;
-  - строки `"role":"assistant"` с `"usage":` — токены, модель, `effort`; контекст =
-    `input + cache_read + cache_creation` последнего ответа; метка `[1m]` в начале файла =
-    лимит 1M, иначе 200K;
-  - `gitBranch`, `permissionMode`, `entrypoint` — на строках user/assistant;
-  - человеческий промпт = `"type":"user"` + `"origin":{"kind":"human"}`.
-  Транскрипты читаются **инкрементально** (`SessionTracker` в `core.py`): с последнего
-  смещения, поэтому многомегабайтные сессии не нагружают систему. Время в файлах UTC,
-  срезы по часам/минутам переводятся в локальное.
-- Статистика за день и за 7 дней — regex-скан всех `*.jsonl` с mtime за последние 36 ч / 8 дней,
-  раз в 20 с в фоновом потоке.
+  The process is verified through psutil: Claude Code's process name is its version number
+  (`2.1.263`), so the reliable signal is an `exe` path under `~/.local/share/claude/versions/`.
+- **Transcript** `~/.claude/projects/<cwd with / and . → ->/<sessionId>.jsonl`:
+  - `{"type":"ai-title","aiTitle":…}` — task name (TASK column);
+  - `{"type":"last-prompt","lastPrompt":…}` — the user's last request;
+  - `"role":"assistant"` lines carrying `"usage":` — tokens, model, `effort`; context =
+    `input + cache_read + cache_creation` of the last response; an `[1m]` marker at the top
+    of the file means a 1M limit, otherwise 200K;
+  - `gitBranch`, `permissionMode`, `entrypoint` — on user/assistant lines;
+  - a human prompt is `"type":"user"` plus `"origin":{"kind":"human"}`.
+  Transcripts are read **incrementally** (`SessionTracker` in `core.py`) from the last
+  offset, so multi-megabyte sessions cost nothing. Timestamps in the files are UTC; hourly
+  and per-minute buckets are converted to local time.
+- Today's and the 7-day statistics come from a regex scan of every `*.jsonl` with an mtime
+  within the last 36 h / 8 days, refreshed every 20 s on a background thread.
 
-## Откуда берутся системные данные (Linux)
+## Where the system data comes from (Linux)
 
-Всё читается напрямую из ядра, внешних демонов не требуется:
+Read straight from the kernel; no daemons required:
 
-- **Процессор и модель** — `/proc/cpuinfo`, дистрибутив — `/etc/os-release`.
-- **Энергия** — счётчики RAPL в `/sys/class/powercap`: ватты считаются как приращение
-  микроджоулей между опросами. Диски, ОЗУ, плата и БП не измеряются — датчиков нет.
-- **Температуры** — `/sys/class/hwmon` (CPU через k10temp), видеокарты — `nvidia-smi`.
-- **Батарея** — циклы и здоровье из `/sys/class/power_supply`, если ядро их отдаёт.
-- **Сеть** — маршрут по умолчанию через `ip -4 route show default`, DNS из
-  `/etc/resolv.conf`, Wi-Fi через `nmcli`, TCP-сокеты и слушающие порты — `psutil`.
-- **Контейнеры** — `podman ps`, при его отсутствии `docker ps`; нет ни того ни другого —
-  карточка просто не показывается.
-- **Видеокарты** — `nvidia-smi` (загрузка, видеопамять, температура, частоты, процессы).
-  Без NVIDIA вкладка 6 пустая.
+- **CPU and model** — `/proc/cpuinfo`; distribution — `/etc/os-release`.
+- **Power** — RAPL counters in `/sys/class/powercap`: watts are the microjoule delta between
+  polls. Disks, RAM, board and PSU are not measured — no sensors.
+- **Temperatures** — `/sys/class/hwmon` (CPU via k10temp), GPUs via `nvidia-smi`.
+- **Battery** — cycles and health from `/sys/class/power_supply`, when the kernel exposes them.
+- **Network** — default route via `ip -4 route show default`, DNS from `/etc/resolv.conf`,
+  Wi-Fi via `nmcli`, TCP sockets and listening ports via `psutil`.
+- **Containers** — `podman ps`, falling back to `docker ps`; with neither installed the card
+  is simply hidden.
+- **GPUs** — `nvidia-smi` (utilisation, VRAM, temperature, clocks, processes). Without an
+  NVIDIA card tab 6 is empty.
 
-## Файлы
+## Files
 
 ```
-share/core.py      сбор данных, SessionTracker, логотип, статичная отрисовка (rich)
-share/tui.py       приложение Textual: 5 вкладок, адаптивные колонки, live-обновление
-share/snapshot.py  режим mx stat -s / -w
-share/mxstat.py    точка входа (лаунчер вызывает её через venv)
-bin/mx             пример shell-лаунчера (install.sh пишет свой с абсолютными путями)
-install.sh         установка
-requirements.txt   textual==8.2.8 · psutil==7.2.2 · rich==15.0.0
-tests/smoke_test.py headless-проверка через Textual Pilot
-CLAUDE-INSTALL.md  инструкция для Claude Code на новой машине
+share/core.py       data collection, SessionTracker, logo, static rendering (rich)
+share/tui.py        Textual app: 6 tabs, adaptive columns, live updates
+share/snapshot.py   the mx stat -s / -w mode
+share/mxstat.py     entry point (the launcher invokes it through the venv)
+bin/mx              example shell launcher (install.sh writes its own with absolute paths)
+install.sh          installation
+requirements.txt    textual==8.2.8 · psutil==7.2.2 · rich==15.0.0
+tests/smoke_test.py headless check via Textual Pilot
+CLAUDE-INSTALL.md   instructions for Claude Code on a fresh machine
 ```
 
-Логотип и палитра — константы `LOGO`, `BRAND`, `WHITE` в начале `core.py`.
+Logo and palette are the `LOGO`, `BRAND`, `WHITE` constants at the top of `core.py`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

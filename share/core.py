@@ -922,7 +922,7 @@ def render_network(width: int = 118) -> Group:
                 continue
             tag = ""
             if a.address.startswith(("10.8.", "10.9.")):
-                tag = " merxion"
+                tag = " vpn"
             elif a.address.startswith("100."):
                 tag = " tailscale"
             found.append(f"{name} {a.address}{tag}")

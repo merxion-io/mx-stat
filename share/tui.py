@@ -380,7 +380,7 @@ class Sampler:
 
 
 # ═══════════════════════════════ приложение ════════════════════════════════
-class MerxionStat(App):
+class MxStat(App):
     TITLE = f"{BRAND} · Stat"
     CSS = """
     Screen { background: #16161e; color: #c0caf5; }
@@ -1089,8 +1089,9 @@ class MerxionStat(App):
             for a in lst:
                 if a.family.name != "AF_INET":
                     continue
-                tag = ("merxion" if a.address.startswith(("10.8.", "10.9."))
-                       else "tailscale" if a.address.startswith("100.") else name)
+                tag = ("vpn" if a.address.startswith(("10.8.", "10.9."))
+                       else "tailscale" if a.address.startswith("100.")
+                       else name)
                 vpn.append(tag)
         if vpn:
             rows.append(line("VPN", ", ".join(sorted(set(vpn))), lw=8))
@@ -1459,8 +1460,9 @@ class MerxionStat(App):
                 continue
             for a in lst:
                 if a.family.name == "AF_INET":
-                    tag = ("merxion" if a.address.startswith(("10.8.", "10.9."))
-                           else "tailscale" if a.address.startswith("100.") else "туннель")
+                    tag = ("vpn" if a.address.startswith(("10.8.", "10.9."))
+                           else "tailscale" if a.address.startswith("100.")
+                           else "туннель")
                     vpn.append(f"{name} {a.address} ({tag})")
         rows = [
             line("маршрут", f"{s.iface}  →  {s.gw}", lw=12),
@@ -1486,8 +1488,9 @@ class MerxionStat(App):
             addr = next((a.address for a in addrs.get(name, [])
                          if a.family.name == "AF_INET"), "—")
             if name.startswith(core.VPN_PREFIXES):
-                kind = ("merxion" if addr.startswith(("10.8.", "10.9."))
-                        else "tailscale" if addr.startswith("100.") else "туннель")
+                kind = ("vpn" if addr.startswith(("10.8.", "10.9."))
+                        else "tailscale" if addr.startswith("100.")
+                        else "туннель")
             elif name == "lo":
                 kind = "loopback"
             elif name == s.iface:
@@ -1517,5 +1520,5 @@ class MerxionStat(App):
 
 
 def main() -> int:
-    MerxionStat().run()
+    MxStat().run()
     return 0
