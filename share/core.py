@@ -152,6 +152,7 @@ CR_RE = re.compile(rb'"cache_read_input_tokens":(\d+)')
 CC_RE = re.compile(rb'"cache_creation_input_tokens":(\d+)')
 THINK_RE = re.compile(rb'"thinking_tokens":(\d+)')
 SID_RE = re.compile(rb'"sessionId":"([0-9a-f-]{36})"')
+ROLLOUT_SID_RE = re.compile(r'([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.jsonl$')
 MODEL_RE = re.compile(rb'"model":"([^"]+)"')
 EFFORT_RE = re.compile(rb'"effort":"(\w+)"')
 BRANCH_RE = re.compile(rb'"gitBranch":"([^"]*)"')
@@ -197,15 +198,19 @@ def empty_today() -> dict:
 
 
 def scan_today() -> dict:
-    """Сводка по всем сессиям Claude Code за сегодня (быстрый regex-скан).
+    """Сводка по всем сессиям за сегодня (быстрый regex-скан).
 
-    Считает по локальному времени: часовые и минутные срезы для графиков."""
+    Считает по локальному времени: часовые и минутные срезы для графиков.
+    Провайдеры складываются: claude по транскриптам, codex по rollout-ам.
+    opencode сюда не попадает — он хранит только итог по сессии, без разбивки
+    по дням, и приписать его токены конкретной дате нельзя."""
     today = date.today().isoformat()
     stats = empty_today()
+    cutoff = time.time() - 36 * 3600
+    _scan_today_codex(stats, today, cutoff)
     root = CLAUDE / "projects"
     if not root.is_dir():
         return stats
-    cutoff = time.time() - 36 * 3600
     for f in root.rglob("*.jsonl"):
         try:
             if f.stat().st_mtime < cutoff:
@@ -246,6 +251,102 @@ def scan_today() -> dict:
         except OSError:
             continue
     return stats
+
+
+def codex_files(cutoff: float):
+    """Rollout-транскрипты codex, тронутые не раньше cutoff."""
+    sdir = CODEX / "sessions"
+    if not sdir.is_dir():
+        return
+    for f in sdir.rglob("rollout-*.jsonl"):
+        try:
+            if f.stat().st_mtime >= cutoff:
+                yield f
+        except OSError:
+            continue
+
+
+def _codex_sid(f: Path) -> str:
+    m = ROLLOUT_SID_RE.search(f.name)
+    return m.group(1) if m else f.name
+
+
+def _scan_today_codex(stats: dict, today: str, cutoff: float) -> None:
+    """Дописать в сводку за сегодня ответы и токены codex.
+
+    Один token_usage_record — один ответ модели, в его `usage` лежит дельта
+    именно этого ответа (в отличие от turn_/thread_token_usage рядом)."""
+    for f in codex_files(cutoff):
+        sid = _codex_sid(f)
+        model = ""
+        try:
+            with f.open("rb") as fh:
+                for line in fh:
+                    if b'"type":"turn_context"' in line:
+                        mdl = MODEL_RE.search(line)
+                        if mdl:
+                            model = mdl.group(1).decode(errors="replace")
+                    m = TS_RE.search(line)
+                    if not m:
+                        continue
+                    day, hour, minute = local_stamp(m.group(1))
+                    if day != today:
+                        continue
+                    if b'"type":"function_call"' in line or b'"custom_tool_call"' in line:
+                        stats["tools"] += 1
+                    if b'"role":"user"' in line and b"<environment_context>" not in line:
+                        stats["prompts"] += 1
+                    if b'"type":"token_usage_record"' not in line:
+                        continue
+                    try:
+                        u = (json.loads(line).get("payload") or {}).get("usage") or {}
+                    except ValueError:
+                        continue
+                    stats["sessions"].add(sid)
+                    stats["msgs"] += 1
+                    stats["hours_msgs"][hour] += 1
+                    stats["minutes"][minute] += 1
+                    out = u.get("output_tokens") or 0
+                    stats["out"] += out
+                    stats["hours_out"][hour] += out
+                    stats["inp"] += u.get("input_tokens") or 0
+                    stats["cr"] += u.get("cached_input_tokens") or 0
+                    stats["cc"] += u.get("cache_write_input_tokens") or 0
+                    stats["think"] += u.get("reasoning_output_tokens") or 0
+                    if model:
+                        stats["models"][model] = stats["models"].get(model, 0) + 1
+        except OSError:
+            continue
+
+
+def _scan_days_codex(acc: dict, index: set, cutoff: float) -> None:
+    for f in codex_files(cutoff):
+        sid = _codex_sid(f)
+        try:
+            with f.open("rb") as fh:
+                for line in fh:
+                    m = TS_RE.search(line)
+                    if not m:
+                        continue
+                    day, _, _ = local_stamp(m.group(1))
+                    if day not in index:
+                        continue
+                    bucket = acc[day]
+                    if b'"type":"function_call"' in line or b'"custom_tool_call"' in line:
+                        bucket["tools"] += 1
+                    if b'"type":"token_usage_record"' not in line:
+                        continue
+                    try:
+                        u = (json.loads(line).get("payload") or {}).get("usage") or {}
+                    except ValueError:
+                        continue
+                    bucket["sessions"].add(sid)
+                    bucket["msgs"] += 1
+                    bucket["out"] += u.get("output_tokens") or 0
+                    bucket["cr"] += u.get("cached_input_tokens") or 0
+                    bucket["cc"] += u.get("cache_write_input_tokens") or 0
+        except OSError:
+            continue
 
 
 def recent_msgs(today: dict, minutes: int) -> int:
@@ -402,7 +503,7 @@ class SessionTracker:
                             block = fh.read(CODEX_BLOCK)
                             if not block:
                                 break
-                            msgs += block.count(b'"type":"token_count"')
+                            msgs += block.count(b'"type":"token_usage_record"')
                         start = max(0, st.st_size - CODEX_TAIL)
                         fh.seek(start)
                         if start:
@@ -492,6 +593,7 @@ class SessionTracker:
                 r["out"] = tot.get("output_tokens") or r["out"]
                 r["cr"] = tot.get("cached_input_tokens") or r["cr"]
                 r["think"] = tot.get("reasoning_output_tokens") or r["think"]
+            elif kind == "token_usage_record":
                 r["msgs"] += 1
             elif kind == "event_msg" and ptype in ("task_started", "task_complete",
                                                    "turn_aborted"):
@@ -1794,10 +1896,11 @@ def scan_days(days: int = 7) -> list[tuple[str, dict]]:
     def fresh():
         return {"msgs": 0, "out": 0, "cr": 0, "cc": 0, "tools": 0, "sessions": set()}
     acc: dict[str, dict] = defaultdict(fresh)
+    cutoff = time.time() - (days + 1) * 86400
+    _scan_days_codex(acc, index, cutoff)
     root = CLAUDE / "projects"
     if not root.is_dir():
-        return [(d, fresh()) for d in wanted]
-    cutoff = time.time() - (days + 1) * 86400
+        return [(d, acc[d]) for d in wanted]
     for f in root.rglob("*.jsonl"):
         try:
             if f.stat().st_mtime < cutoff:

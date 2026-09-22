@@ -12,8 +12,8 @@ writes to disk:
 | Provider | Detected | Task, model, context, tokens |
 |---|---|---|
 | Claude Code | ✅ | ✅ full, plus branch, permission mode and daily token stats |
-| Codex | ✅ | ✅ full, plus real busy/idle from turn events |
-| opencode | ✅ | ✅ task, model, session tokens (no context-window size is recorded) |
+| Codex | ✅ | ✅ full, plus daily token stats and real busy/idle from turn events |
+| opencode | ✅ | ✅ task, model, session tokens (no context window, no daily breakdown) |
 | muse, crush, qwen, aider, gemini | ✅ process only | — no on-disk session state to read |
 
 Adding a provider is one function in `share/core.py` — see `_codex_agents` /
@@ -88,8 +88,10 @@ Everything is read from each agent's own files — no API, no network.
   and per-minute buckets are converted to local time.
 - Today's and the 7-day statistics come from a regex scan of every `*.jsonl` with an mtime
   within the last 36 h / 8 days, refreshed every 20 s on a background thread.
-  **These daily totals cover Claude Code only** — the other providers feed the agent table
-  but not yet the token cards.
+  Codex rollouts are scanned the same way and added in, so the daily cards and the 7-day
+  histogram cover both providers; the model breakdown names each one. **opencode is not
+  included** — its database stores one running total per session with no per-day breakdown,
+  so its tokens cannot honestly be attributed to a date.
 
 ### Codex
 
