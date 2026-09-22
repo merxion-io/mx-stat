@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""hstat.core — сбор системных данных и статичная отрисовка через rich.
+"""Merxion Stat · core — сбор системных данных и статичная отрисовка через rich.
 
-Общая база для снапшота (hstat --snapshot) и полноэкранного TUI (hstat).
+Общая база для снапшота (mx stat -s) и полноэкранного TUI (mx stat).
 Линуксовая версия: данные берутся из psutil, /proc, /etc и ip/podman."""
 from __future__ import annotations
 
@@ -583,7 +583,7 @@ def render_header(console: Console, agents: list[dict] | None = None) -> Panel:
         if busy:
             l2.append(f" (busy {busy})", style=YELLOW)
     if console.width >= 118:
-        l2.append("  ·  hstat", style=DIM)
+        l2.append("  ·  Stat", style=DIM)
 
     grid = Table.grid(padding=(0, 2))
     wide = console.width >= 100

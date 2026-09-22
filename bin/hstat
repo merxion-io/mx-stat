@@ -1,5 +1,0 @@
-#!/bin/sh
-# Лаунчер hstat. install.sh генерирует такой же с абсолютными путями;
-# этот вариант — переносимый, ищет установку через $HSTAT_HOME или ~/.local/share/hstat.
-HSTAT_HOME="${HSTAT_HOME:-$HOME/.local/share/hstat}"
-exec "$HSTAT_HOME/venv/bin/python" "$HSTAT_HOME/hstat.py" "$@"

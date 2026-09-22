@@ -1,9 +1,9 @@
-"""hstat — live-монитор системы и AI-агентов Claude Code (MERXION).
+"""Merxion Stat — live-монитор системы и AI-агентов Claude Code (MERXION).
 
-  hstat              полноэкранный TUI (по умолчанию)
-  hstat -s           один статичный снимок (годится для пайпов)
-  hstat -s -w [сек]  простой перерисовывающийся вывод без TUI
-  hstat --no-color   снимок без цвета
+  mx stat              полноэкранный TUI (по умолчанию)
+  mx stat -s           один статичный снимок (годится для пайпов)
+  mx stat -s -w [сек]  простой перерисовывающийся вывод без TUI
+  mx stat --no-color   снимок без цвета
 
 Клавиши в TUI: 1-6 вкладки (6 — видеокарты) · p пауза · s сортировка процессов · f только claude
                r пересчитать · +/- интервал · q выход
@@ -15,6 +15,10 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 args = sys.argv[1:]
+if args and args[0] == "stat":      # вызов через обёртку `mx stat …`
+    args = args[1:]
+    sys.argv = [sys.argv[0], *args]  # snapshot.py читает sys.argv сам
+
 if "-h" in args or "--help" in args:
     print(__doc__.strip())
     sys.exit(0)

@@ -1,0 +1,10 @@
+#!/bin/sh
+# Лаунчер Merxion Stat. install.sh генерирует такой же с абсолютными путями;
+# этот вариант — переносимый, ищет установку через $MXSTAT_HOME или ~/.local/share/MerxionStat.
+MXSTAT_HOME="${MXSTAT_HOME:-$HOME/.local/share/MerxionStat}"
+case "${1:-}" in
+    stat) ;;
+    -h|--help|"") echo "mx stat [-s] [-w [сек]] [--no-color]   — монитор системы и агентов"; exit 0 ;;
+    *) echo "mx: неизвестная команда '$1' (доступно: stat)" >&2; exit 2 ;;
+esac
+exec "$MXSTAT_HOME/venv/bin/python" "$MXSTAT_HOME/mxstat.py" "$@"

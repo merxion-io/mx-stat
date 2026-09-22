@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Установка hstat (MERXION) на этот компьютер.
+# Установка Merxion Stat (MERXION) на этот компьютер.
 #
-#   ./install.sh              → ~/.local/share/hstat + лаунчер ~/.local/bin/hstat
-#   HSTAT_HOME=… HSTAT_BIN=…  → другие пути
+#   ./install.sh                → ~/.local/share/MerxionStat + лаунчер ~/.local/bin/mx
+#   MXSTAT_HOME=… MXSTAT_BIN=…  → другие пути
 #
 # Нужен Python 3.11+ (venv создаётся через uv, если он есть, иначе python3 -m venv).
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEST="${HSTAT_HOME:-$HOME/.local/share/hstat}"
-BIN="${HSTAT_BIN:-$HOME/.local/bin}"
+DEST="${MXSTAT_HOME:-$HOME/.local/share/MerxionStat}"
+BIN="${MXSTAT_BIN:-$HOME/.local/bin}"
 PYMIN="3.11"
 
 say()  { printf '\033[1;36m▸\033[0m %s\n' "$*"; }
@@ -46,20 +46,38 @@ else
 fi
 
 # ── лаунчер ──
-cat > "$BIN/hstat" <<EOF
+# Тело держим синхронным с переносимым вариантом bin/mx.
+cat > "$BIN/mx" <<EOF
 #!/bin/sh
-exec "$DEST/venv/bin/python" "$DEST/hstat.py" "\$@"
+case "\${1:-}" in
+    stat) ;;
+    -h|--help|"") echo "mx stat [-s] [-w [сек]] [--no-color]   — монитор системы и агентов"; exit 0 ;;
+    *) echo "mx: неизвестная команда '\$1' (доступно: stat)" >&2; exit 2 ;;
+esac
+exec "$DEST/venv/bin/python" "$DEST/mxstat.py" "\$@"
 EOF
-chmod +x "$BIN/hstat"
-say "Лаунчер: $BIN/hstat"
+chmod +x "$BIN/mx"
+say "Лаунчер: $BIN/mx"
 
 # ── проверка ──
-"$BIN/hstat" -h >/dev/null || die "лаунчер не запускается"
+"$BIN/mx" stat -h >/dev/null || die "лаунчер не запускается"
 "$DEST/venv/bin/python" -c "import textual, psutil, rich; print('   textual', textual.__version__, '· psutil', psutil.__version__)"
+
+# ── уборка старой установки hstat ──
+OLD_DEST="$HOME/.local/share/hstat"
+OLD_BIN="$BIN/hstat"
+if [ -e "$OLD_BIN" ]; then
+    rm -f "$OLD_BIN"
+    say "Удалён старый лаунчер: $OLD_BIN"
+fi
+if [ -d "$OLD_DEST" ] && [ "$OLD_DEST" != "$DEST" ]; then
+    rm -rf "$OLD_DEST"
+    say "Удалён старый каталог: $OLD_DEST"
+fi
 
 case ":$PATH:" in
     *":$BIN:"*) ;;
     *) printf '\033[1;33m!\033[0m %s\n' "$BIN не в PATH — добавьте в ~/.zshrc:  export PATH=\"$BIN:\$PATH\"" ;;
 esac
 
-say "Готово. Запуск:  hstat   (снимок: hstat -s)"
+say "Готово. Запуск:  mx stat   (снимок: mx stat -s)"

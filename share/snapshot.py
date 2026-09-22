@@ -1,4 +1,4 @@
-"""hstat.snapshot — одноразовый статичный вывод (hstat -s) и простой watch."""
+"""Merxion Stat · snapshot — одноразовый статичный вывод (mx stat -s) и простой watch."""
 import os
 import sys
 import time

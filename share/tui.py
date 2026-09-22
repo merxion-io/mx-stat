@@ -1,4 +1,4 @@
-"""hstat.tui — полноэкранный live-монитор системы и AI-агентов (Textual)."""
+"""Merxion Stat · tui — полноэкранный live-монитор системы и AI-агентов (Textual)."""
 from __future__ import annotations
 
 import os
@@ -380,8 +380,8 @@ class Sampler:
 
 
 # ═══════════════════════════════ приложение ════════════════════════════════
-class Hstat(App):
-    TITLE = f"{BRAND} · hstat"
+class MerxionStat(App):
+    TITLE = f"{BRAND} · Stat"
     CSS = """
     Screen { background: #16161e; color: #c0caf5; }
     #topbar { height: 2; background: #1f2335; color: #c0caf5; padding: 0 1; }
@@ -1517,5 +1517,5 @@ class Hstat(App):
 
 
 def main() -> int:
-    Hstat().run()
+    MerxionStat().run()
     return 0
