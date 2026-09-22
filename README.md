@@ -147,3 +147,5 @@ Logo and palette are the `LOGO`, `BRAND`, `WHITE` constants at the top of `core.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+© 2026 Merxion Solution S.R.L.

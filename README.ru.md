@@ -144,3 +144,5 @@ CLAUDE-INSTALL.md  инструкция для Claude Code на новой ма�
 ## Лицензия
 
 MIT — см. [LICENSE](LICENSE).
+
+© 2026 Merxion Solution S.R.L.
