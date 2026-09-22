@@ -1,11 +1,23 @@
-# mx-stat — system & Claude Code agent monitor
+# mx-stat — system & AI agent monitor
 
 [Русская версия](README.ru.md) · MIT · Linux · Python 3.11+
 
 A full-screen terminal monitor (Textual, tokyo-night theme). Beyond the usual `htop` view
-it shows **live Claude Code sessions**: what each one is working on, which model, how much
-context is consumed, when it last wrote, tokens spent today, a per-minute response pulse
-and an hourly histogram.
+it shows **live coding-agent sessions**: what each one is working on, which model, how much
+context is consumed, when it last wrote, a per-minute response pulse and an hourly histogram.
+
+Agents are discovered per provider; how much detail is available depends on what each one
+writes to disk:
+
+| Provider | Detected | Task, model, context, tokens |
+|---|---|---|
+| Claude Code | ✅ | ✅ full, plus branch, permission mode and daily token stats |
+| Codex | ✅ | ✅ full, plus real busy/idle from turn events |
+| opencode | ✅ | ✅ task, model, session tokens (no context-window size is recorded) |
+| muse, crush, qwen, aider, gemini | ✅ process only | — no on-disk session state to read |
+
+Adding a provider is one function in `share/core.py` — see `_codex_agents` /
+`_opencode_agents` for the shape.
 
 ```
 █▀▄▀█ █▀▀ █▀█ ▀▄▀ █ █▀█ █▄ █  │ AMD Ryzen 9 · Fedora 42 · ↑ 9d 21h · Tue 08.09  11:42:21
@@ -55,7 +67,9 @@ Keys: `1`–`6` tabs · `p` pause · `s` sort · `f` claude filter · `r` refres
 
 ## Where the agent data comes from
 
-Everything is read from Claude Code's own files — no API, no network:
+Everything is read from each agent's own files — no API, no network.
+
+### Claude Code
 
 - **`~/.claude/sessions/<pid>.json`** — live sessions: `sessionId`, `cwd`, `name`, `status`
   (`idle`/`busy`/`shell`), `version`, `startedAt`, `entrypoint` (`cli` / `sdk-cli`).
@@ -74,6 +88,29 @@ Everything is read from Claude Code's own files — no API, no network:
   and per-minute buckets are converted to local time.
 - Today's and the 7-day statistics come from a regex scan of every `*.jsonl` with an mtime
   within the last 36 h / 8 days, refreshed every 20 s on a background thread.
+  **These daily totals cover Claude Code only** — the other providers feed the agent table
+  but not yet the token cards.
+
+### Codex
+
+`~/.codex/sessions/<year>/<month>/<day>/rollout-*.jsonl` — one append-only transcript per
+session, read incrementally exactly like Claude's. `turn_context` carries the model and
+reasoning effort, `token_count` the live context plus `model_context_window`, and
+`task_started` / `task_complete` give a genuine busy/idle status. Thread names come from
+`~/.codex/session_index.jsonl`. A live process is tied to its session by the UUID in
+`codex resume <uuid>`, or failing that by the newest transcript in the same working
+directory that was written to during the process's lifetime.
+
+Rollouts reach tens of megabytes, so the first pass counts responses with a byte scan and
+JSON-parses only the last 4 MB: everything displayed is rewritten on every turn, so the
+history is not needed.
+
+### opencode
+
+`~/.local/share/opencode/opencode.db`, the `session` table only — title, model, directory
+and per-session token counters. That table holds dozens of rows even when the database is
+hundreds of megabytes, and it is opened read-only. opencode records no context-window size,
+so the accumulated input is shown in place of a context bar.
 
 ## Where the system data comes from (Linux)
 

@@ -26,12 +26,14 @@ SORT_KEYS = (("cpu", "CPU"), ("rss", "память"), ("threads", "потоки"
 # Узкий терминал теряет второстепенные колонки, а не режет всё многоточиями.
 AGENT_COLS = {
     "t-agents": (
-        ("dot", "", 0), ("name", "ИМЯ", 0), ("title", "ЗАДАЧА", 0), ("model", "МОДЕЛЬ", 96),
+        ("dot", "", 0), ("agent", "АГЕНТ", 88), ("name", "ИМЯ", 0),
+        ("title", "ЗАДАЧА", 0), ("model", "МОДЕЛЬ", 96),
         ("ctx", "КОНТЕКСТ", 0), ("act", "АКТИВН.", 0), ("msgs", "ОТВ.", 104),
         ("cpu", "CPU", 0), ("rss", "ПАМЯТЬ", 112), ("proj", "ПРОЕКТ", 150),
     ),
     "t-agents2": (
-        ("dot", "", 0), ("name", "ИМЯ", 0), ("title", "ЗАДАЧА", 0), ("model", "МОДЕЛЬ", 96),
+        ("dot", "", 0), ("agent", "АГЕНТ", 88), ("name", "ИМЯ", 0),
+        ("title", "ЗАДАЧА", 0), ("model", "МОДЕЛЬ", 96),
         ("branch", "ВЕТКА", 172), ("pmode", "РЕЖИМ", 182), ("entry", "ТИП", 192),
         ("msgs", "ОТВ.", 104), ("prompts", "ПРОМПТ.", 178), ("tools", "ИНСТР.", 128),
         ("out", "ВЫХОД", 120), ("ctx", "КОНТЕКСТ", 0), ("act", "АКТИВН.", 0),
@@ -280,7 +282,7 @@ class Sampler:
     def _sample_agents(self, now: float) -> None:
         agents = []
         for a in core.find_agents():
-            pid, meta = a["pid"], a["meta"]
+            pid, meta, prov = a["pid"], a["meta"], a.get("agent", "claude")
             p = self._proc(pid)
             if p is None:
                 continue
@@ -294,11 +296,15 @@ class Sampler:
             sid = meta.get("sessionId", "")
             cwd = meta.get("cwd", "?")
             rec = self.tracker.get(sid)
-            status = meta.get("status") or "—"
+            # claude пишет статус сам, codex выводится из хода, у прочих его нет
+            status = meta.get("status") or rec.get("status") or "—"
             st_age = (now * 1000 - meta.get("statusUpdatedAt", 0)) / 1000
             agents.append({
                 "pid": pid, "name": meta.get("name", "—"), "status": status,
-                "stale": status != "—" and st_age > 1800, "st_age": st_age, "cwd": cwd,
+                "agent": prov, "src": a.get("src", ""),
+                "meta_title": meta.get("title", ""),
+                "stale": prov == "claude" and status != "—" and st_age > 1800,
+                "st_age": st_age, "cwd": cwd,
                 "sid": sid, "version": meta.get("version", "?"),
                 "kind": meta.get("kind", "?"), "entry": meta.get("entrypoint", "?"),
                 "started": meta.get("startedAt", 0) / 1000,
@@ -346,7 +352,7 @@ class Sampler:
         """Догнать транскрипты живых сессий (инкрементально, дёшево)."""
         for a in list(self.agents):
             try:
-                self.tracker.update(a["cwd"], a["sid"])
+                self.tracker.update(a["cwd"], a["sid"], a["agent"], a["src"])
             except Exception:
                 continue
 
@@ -924,20 +930,27 @@ class MxStat(App):
         dot.append(label, style=DIM)
         rec = a["rec"]
         ctx = Text()
-        if rec["ready"]:
+        if rec["ready"] and a["limit"]:
             ctx.append_text(core.bar(a["ctx"] * 100 / max(1, a["limit"]), 8, lo=60, hi=80))
             ctx.append(f" {htok(a['ctx'])}", style=FG)
             ctx.append(f"/{htok(a['limit'])}", style=DIM)
-        else:
+        elif rec["ready"] and rec["inp"]:
+            # opencode копит токены за сессию и не сообщает размер окна
+            ctx.append(f"{htok(rec['inp'])} вход", style=FG)
+        elif a["sid"]:
             ctx.append("…", style=DIM)
+        else:
+            ctx.append("—", style=DIM)
         proj = a["cwd"].replace(str(core.HOME), "~")
         if len(proj) > 30:
             proj = "…" + proj[-29:]
+        title = rec["title"] or a.get("meta_title") or ""
         return {
             "dot": dot,
+            "agent": Text(a.get("agent", "?"), style=BLUE),
             "name": Text(a["name"], style=f"bold {CYAN}"),
-            "title": Text(clip(rec["title"], title_w) if rec["title"] else "—",
-                          style=WHITE if rec["title"] else DIM),
+            "title": Text(clip(title, title_w) if title else "—",
+                          style=WHITE if title else DIM),
             "model": Text(a["model"].replace("claude-", ""), style=PURPLE),
             "branch": Text(clip(rec["branch"] or "—", 18), style=FG if rec["branch"] else DIM),
             "pmode": Text(rec["pmode"] or "—",

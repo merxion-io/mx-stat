@@ -9,6 +9,7 @@ import json
 import os
 import platform
 import re
+import sqlite3
 import subprocess
 import threading
 import time
@@ -28,6 +29,10 @@ from rich.text import Text
 
 HOME = Path.home()
 CLAUDE = HOME / ".claude"
+CODEX = HOME / ".codex"
+CODEX_TAIL = 4 << 20        # сколько хвоста rollout-а разбираем на первом проходе
+CODEX_BLOCK = 8 << 20       # шаг побайтового счёта ответов
+OPENCODE_DB = HOME / ".local/share/opencode/opencode.db"
 # префиксы имён интерфейсов, которые считаем VPN-туннелями
 VPN_PREFIXES = ("wg", "tun", "tap", "tailscale", "ppp")
 
@@ -174,9 +179,12 @@ def local_stamp(ts: bytes) -> tuple[str, int, str]:
     return res
 
 
-def iso_epoch(ts: bytes) -> float:
+def iso_epoch(ts: bytes | str) -> float:
+    """UTC-метка ISO → epoch. Дробные секунды и хвостовой Z отбрасываются."""
+    s = ts.decode(errors="replace") if isinstance(ts, bytes) else ts
+    s = s.rstrip("Z").split(".")[0].split("+")[0]
     try:
-        return datetime.strptime(ts.decode(), "%Y-%m-%dT%H:%M:%S") \
+        return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S") \
             .replace(tzinfo=timezone.utc).timestamp()
     except ValueError:
         return 0.0
@@ -301,7 +309,8 @@ def session_context(cwd: str, sid: str) -> tuple[str, int, int]:
 def empty_session(path: Path | None = None) -> dict:
     return {"path": path, "offset": 0, "size": 0, "mtime": 0.0,
             "title": "", "prompt": "", "model": "—", "effort": "", "branch": "",
-            "pmode": "", "ctx": 0, "limit": 200_000, "msgs": 0, "prompts": 0,
+            "pmode": "", "status": "", "ctx": 0, "limit": 200_000,
+            "msgs": 0, "prompts": 0,
             "tools": 0, "last_tool": "", "out": 0, "inp": 0, "cr": 0, "cc": 0,
             "think": 0, "last_ts": 0.0, "last_prompt_ts": 0.0, "ready": False}
 
@@ -319,7 +328,22 @@ class SessionTracker:
     def get(self, sid: str) -> dict:
         return self.rec.get(sid) or empty_session()
 
-    def update(self, cwd: str, sid: str) -> dict:
+    def update(self, cwd: str, sid: str, agent: str = "claude",
+               src: str = "") -> dict:
+        """Догнать транскрипт сессии. Провайдер выбирает источник и парсер."""
+        if not sid:
+            return empty_session()
+        if agent == "opencode":
+            return self._update_opencode(sid)
+        if agent == "codex":
+            if not src:
+                return self.get(sid)
+            return self._update_codex(sid, Path(src))
+        if agent != "claude":
+            return self.get(sid)
+        return self._update_claude(cwd, sid)
+
+    def _update_claude(self, cwd: str, sid: str) -> dict:
         f = transcript_path(cwd, sid)
         with self._lock:
             r = self.rec.get(sid)
@@ -353,6 +377,142 @@ class SessionTracker:
                 r["limit"] = 1_000_000
             self.rec[sid] = dict(r)   # свежая копия — читатели видят целостный снимок
             return self.rec[sid]
+
+    def _update_codex(self, sid: str, f: Path) -> dict:
+        """Транскрипт codex. Дальше — инкрементально, как у claude.
+
+        Первый проход особый: rollout живой сессии доходит до десятков
+        мегабайт, а разбирать его целиком в JSON слишком дорого. Счётчик
+        ответов снимаем побайтовым поиском маркера по всему файлу, а
+        собственно состояние (модель, контекст, статус) — только с хвоста:
+        всё это перезаписывается каждым ходом, предыстория не нужна."""
+        with self._lock:
+            r = self.rec.get(sid)
+            try:
+                st = f.stat()
+            except OSError:
+                return r or empty_session(f)
+            if r is None or r["path"] != f or st.st_size < r["offset"]:
+                r = empty_session(f)
+                r["limit"] = 0
+                msgs, tail = 0, b""
+                try:
+                    with f.open("rb") as fh:
+                        while True:
+                            block = fh.read(CODEX_BLOCK)
+                            if not block:
+                                break
+                            msgs += block.count(b'"type":"token_count"')
+                        start = max(0, st.st_size - CODEX_TAIL)
+                        fh.seek(start)
+                        if start:
+                            fh.readline()      # добить обрезанную строку
+                        tail = fh.read()
+                except OSError:
+                    pass
+                r["offset"] = st.st_size
+                if tail:
+                    self._parse_codex(r, tail)
+                r["msgs"] = msgs               # хвост накрутил свой счётчик
+                r["size"], r["mtime"], r["ready"] = st.st_size, st.st_mtime, True
+                self.rec[sid] = dict(r)
+                return self.rec[sid]
+            if st.st_size > r["offset"]:
+                try:
+                    with f.open("rb") as fh:
+                        fh.seek(r["offset"])
+                        data = fh.read()
+                except OSError:
+                    data = b""
+                nl = data.rfind(b"\n")
+                if nl >= 0:
+                    chunk = data[:nl + 1]
+                    r["offset"] += len(chunk)
+                    self._parse_codex(r, chunk)
+            r["size"], r["mtime"], r["ready"] = st.st_size, st.st_mtime, True
+            self.rec[sid] = dict(r)
+            return self.rec[sid]
+
+    def _update_opencode(self, sid: str) -> dict:
+        """Сессия opencode — одна строка sqlite, читать инкрементально нечего."""
+        row = opencode_sessions_by_id().get(sid)
+        if row is None:
+            return self.get(sid)
+        with self._lock:
+            r = self.rec.get(sid) or empty_session()
+            try:
+                r["model"] = (json.loads(row["model"] or "{}").get("id")
+                              or "—")
+            except ValueError:
+                r["model"] = "—"
+            r["title"] = row["title"] or ""
+            r["inp"] = row["tokens_input"] or 0
+            r["out"] = row["tokens_output"] or 0
+            r["cr"] = row["tokens_cache_read"] or 0
+            r["cc"] = row["tokens_cache_write"] or 0
+            r["think"] = row["tokens_reasoning"] or 0
+            # opencode копит токены за всю сессию и не пишет размер окна —
+            # показываем накопленный ввод без шкалы, врать про лимит не о чем
+            r["ctx"], r["limit"] = 0, 0
+            r["mtime"] = (row["time_updated"] or 0) / 1000
+            r["last_ts"] = r["mtime"]
+            r["ready"] = True
+            self.rec[sid] = dict(r)
+            return self.rec[sid]
+
+    @staticmethod
+    def _parse_codex(r: dict, chunk: bytes) -> None:
+        """Записи rollout-транскрипта codex.
+
+        Нужное лежит в четырёх видах записей: turn_context (модель),
+        token_count (контекст и размер окна), task_started/task_complete
+        (реальный busy/idle) и response_item с ролью user (промпты)."""
+        for line in chunk.split(b"\n"):
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            pay = rec.get("payload") or {}
+            kind = rec.get("type")
+            ptype = pay.get("type")
+            if kind == "turn_context":
+                r["model"] = pay.get("model") or r["model"]
+                mode = (pay.get("collaboration_mode") or {}).get("settings") or {}
+                r["effort"] = mode.get("reasoning_effort") or r["effort"]
+                r["pmode"] = pay.get("approval_policy") or r["pmode"]
+            elif kind == "event_msg" and ptype == "token_count":
+                info = pay.get("info") or {}
+                last = info.get("last_token_usage") or {}
+                tot = info.get("total_token_usage") or {}
+                r["ctx"] = last.get("input_tokens") or r["ctx"]
+                r["limit"] = info.get("model_context_window") or r["limit"]
+                r["inp"] = tot.get("input_tokens") or r["inp"]
+                r["out"] = tot.get("output_tokens") or r["out"]
+                r["cr"] = tot.get("cached_input_tokens") or r["cr"]
+                r["think"] = tot.get("reasoning_output_tokens") or r["think"]
+                r["msgs"] += 1
+            elif kind == "event_msg" and ptype in ("task_started", "task_complete",
+                                                   "turn_aborted"):
+                r["status"] = "busy" if ptype == "task_started" else "idle"
+            elif kind == "response_item" and pay.get("role") == "user":
+                txt = ""
+                for c in pay.get("content") or []:
+                    if c.get("type") in ("input_text", "text"):
+                        txt = c.get("text") or ""
+                        break
+                # первый пользовательский блок каждого хода — служебный контекст
+                if txt and not txt.lstrip().startswith("<environment_context>"):
+                    r["prompt"] = txt.strip()
+                    r["prompts"] += 1
+            elif kind == "response_item" and pay.get("type") in ("function_call",
+                                                                 "custom_tool_call"):
+                r["tools"] += 1
+                r["last_tool"] = pay.get("name") or r["last_tool"]
+            ts = rec.get("timestamp")
+            if ts:
+                r["last_ts"] = iso_epoch(ts) or r["last_ts"]
 
     @staticmethod
     def _parse(r: dict, chunk: bytes) -> None:
@@ -412,7 +572,56 @@ class SessionTracker:
 TRACKER = SessionTracker()
 
 
-def find_agents() -> list[dict]:
+# ════════════════════════ агенты: провайдеры ════════════════════════════
+# Каждый провайдер отдаёт единый словарь:
+#   pid, proc, agent (метка провайдера), src (путь/ключ транскрипта),
+#   meta {name, status, statusUpdatedAt, cwd, sessionId, version, entrypoint, kind}
+# Полнота полей разная: у claude/codex/opencode есть задача, модель и токены,
+# у остальных — только сам процесс.
+
+def agent_kind(exe: str, name: str) -> str:
+    """Метка провайдера по исполняемому файлу процесса ('' — не агент)."""
+    base = Path(exe).name if exe else name
+    if "/claude/versions/" in exe or base == "claude":
+        return "claude"
+    if base == "codex":          # codex-code-mode-host и node-обёртки не в счёт
+        return "codex"
+    if base == "opencode":
+        return "opencode"
+    if base == "muse" or base.startswith("muse-bin"):
+        return "muse"
+    if base in ("crush", "qwen", "aider", "gemini"):
+        return base
+    return ""
+
+
+def agent_procs() -> dict[str, list]:
+    """Живые процессы агентов, разложенные по провайдерам."""
+    out: dict[str, list] = {}
+    for p in psutil.process_iter(["name", "exe"]):
+        try:
+            kind = agent_kind(p.info["exe"] or "", p.info["name"] or "")
+        except (psutil.Error, TypeError):
+            continue
+        if kind:
+            out.setdefault(kind, []).append(p)
+    return out
+
+
+def _proc_cwd(p) -> str:
+    try:
+        return p.cwd() or ""
+    except psutil.Error:
+        return ""
+
+
+def _short_name(cwd: str, fallback: str) -> str:
+    base = Path(cwd).name if cwd else ""
+    return base or fallback
+
+
+# ── claude ──────────────────────────────────────────────────────────────
+def _claude_agents() -> list[dict]:
     """Живые сессии Claude Code: ~/.claude/sessions/<pid>.json + проверка процесса."""
     agents = []
     sdir = CLAUDE / "sessions"
@@ -434,8 +643,191 @@ def find_agents() -> list[dict]:
             meta = json.loads(jf.read_text())
         except (OSError, ValueError):
             meta = {}
-        agents.append({"pid": pid, "proc": proc, "meta": meta})
-    agents.sort(key=lambda a: a["meta"].get("startedAt", 0))
+        agents.append({"pid": pid, "proc": proc, "agent": "claude",
+                       "src": "", "meta": meta})
+    return agents
+
+
+# ── codex ───────────────────────────────────────────────────────────────
+_CODEX_IDX: dict[Path, tuple[float, str, str]] = {}   # файл → (mtime, sid, cwd)
+
+
+def codex_rollouts(max_age: float = 2_592_000.0) -> dict[str, dict]:
+    """{session_id: {path, cwd, mtime}} по свежим rollout-транскриптам codex.
+
+    Окно широкое (30 дней): сессию, поднятую через `codex resume`, процесс
+    держит открытой сутками, а её файл всё это время не трогается.
+
+    Первая строка файла (session_meta) читается один раз и кэшируется:
+    id и cwd там неизменны, меняется только размер файла."""
+    out: dict[str, dict] = {}
+    sdir = CODEX / "sessions"
+    if not sdir.is_dir():
+        return out
+    now = time.time()
+    for f in sdir.rglob("rollout-*.jsonl"):
+        try:
+            mt = f.stat().st_mtime
+        except OSError:
+            continue
+        if now - mt > max_age:
+            continue
+        hit = _CODEX_IDX.get(f)
+        if hit is None:
+            try:
+                with f.open("rb") as fh:
+                    meta = json.loads(fh.readline() or b"{}").get("payload", {})
+            except (OSError, ValueError):
+                continue
+            sid = meta.get("session_id") or meta.get("id") or ""
+            if not sid:
+                continue
+            hit = (mt, sid, meta.get("cwd") or "")
+            _CODEX_IDX[f] = hit
+        _, sid, cwd = hit
+        prev = out.get(sid)
+        if prev is None or mt > prev["mtime"]:
+            out[sid] = {"path": f, "cwd": cwd, "mtime": mt}
+    return out
+
+
+def codex_titles() -> dict[str, str]:
+    """{session_id: имя треда} из ~/.codex/session_index.jsonl."""
+    out: dict[str, str] = {}
+    f = CODEX / "session_index.jsonl"
+    try:
+        data = f.read_bytes()
+    except OSError:
+        return out
+    for line in data.split(b"\n"):
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if rec.get("id"):
+            out[rec["id"]] = rec.get("thread_name") or ""
+    return out
+
+
+def _codex_agents(procs: list) -> list[dict]:
+    rolls = codex_rollouts()
+    titles = codex_titles()
+    taken: set[str] = set()
+    agents = []
+    for p in procs:
+        try:
+            cmd = p.cmdline()
+            started = p.create_time()
+        except psutil.Error:
+            continue
+        cwd = _proc_cwd(p)
+        sid = ""
+        # `codex resume <uuid>` называет сессию прямо в аргументах — это точно
+        if "resume" in cmd:
+            i = cmd.index("resume")
+            if len(cmd) > i + 1 and cmd[i + 1].count("-") == 4 and cmd[i + 1] in rolls:
+                sid = cmd[i + 1]
+        if not sid:
+            # иначе берём транскрипт того же каталога, в который писали уже
+            # при жизни этого процесса — значит пишет именно он
+            cands = [(v["mtime"], k) for k, v in rolls.items()
+                     if v["cwd"] == cwd and k not in taken and v["mtime"] >= started]
+            if cands:
+                sid = max(cands)[1]
+        if sid:
+            taken.add(sid)
+        roll = rolls.get(sid, {})
+        agents.append({
+            "pid": p.pid, "proc": p, "agent": "codex",
+            "src": str(roll.get("path", "")),
+            "meta": {"name": _short_name(cwd, "codex"), "status": "",
+                     "cwd": roll.get("cwd") or cwd, "sessionId": sid,
+                     "version": "", "entrypoint": "cli", "kind": "cli",
+                     "title": titles.get(sid, "")},
+        })
+    return agents
+
+
+# ── opencode ────────────────────────────────────────────────────────────
+def opencode_sessions() -> dict[str, dict]:
+    """{directory: строка сессии} — самая свежая сессия на каждый каталог.
+
+    Таблица session крошечная (десятки строк) даже когда файл базы весит
+    сотни мегабайт, поэтому читаем её целиком и только её."""
+    out: dict[str, dict] = {}
+    if not OPENCODE_DB.exists():
+        return out
+    try:
+        con = sqlite3.connect(f"file:{OPENCODE_DB}?mode=ro", uri=True, timeout=0.5)
+    except sqlite3.Error:
+        return out
+    try:
+        con.row_factory = sqlite3.Row
+        rows = con.execute(
+            "select id, directory, title, agent, model, tokens_input, tokens_output,"
+            " tokens_reasoning, tokens_cache_read, tokens_cache_write, cost,"
+            " time_created, time_updated from session where time_archived is null"
+        ).fetchall()
+    except sqlite3.Error:
+        return out
+    finally:
+        con.close()
+    for r in rows:
+        d = dict(r)
+        cur = out.get(d["directory"] or "")
+        if cur is None or (d["time_updated"] or 0) > (cur["time_updated"] or 0):
+            out[d["directory"] or ""] = d
+    return out
+
+
+def opencode_sessions_by_id() -> dict[str, dict]:
+    """Те же сессии opencode, но ключом — идентификатор сессии."""
+    return {r["id"]: r for r in opencode_sessions().values() if r.get("id")}
+
+
+def _opencode_agents(procs: list) -> list[dict]:
+    sess = opencode_sessions()
+    agents = []
+    for p in procs:
+        cwd = _proc_cwd(p)
+        row = sess.get(cwd) or {}
+        agents.append({
+            "pid": p.pid, "proc": p, "agent": "opencode",
+            "src": row.get("id", ""),
+            "meta": {"name": _short_name(cwd, "opencode"), "status": "",
+                     "cwd": cwd, "sessionId": row.get("id", ""),
+                     "version": "", "entrypoint": "cli", "kind": "cli",
+                     "title": row.get("title") or ""},
+        })
+    return agents
+
+
+# ── остальные CLI: видим процесс, транскрипт не разбираем ───────────────
+def _plain_agents(kind: str, procs: list) -> list[dict]:
+    out = []
+    for p in procs:
+        cwd = _proc_cwd(p)
+        out.append({
+            "pid": p.pid, "proc": p, "agent": kind, "src": "",
+            "meta": {"name": _short_name(cwd, kind), "status": "",
+                     "cwd": cwd, "sessionId": "", "version": "",
+                     "entrypoint": "cli", "kind": "cli", "title": ""},
+        })
+    return out
+
+
+def find_agents() -> list[dict]:
+    """Живые AI-агенты всех поддерживаемых провайдеров."""
+    procs = agent_procs()
+    agents = _claude_agents()
+    agents += _codex_agents(procs.get("codex", []))
+    agents += _opencode_agents(procs.get("opencode", []))
+    for kind, plist in procs.items():
+        if kind not in ("claude", "codex", "opencode"):
+            agents += _plain_agents(kind, plist)
+    agents.sort(key=lambda a: (a["agent"], a["meta"].get("startedAt", 0), a["pid"]))
     return agents
 
 
@@ -577,7 +969,7 @@ def render_header(console: Console, agents: list[dict] | None = None) -> Panel:
     l2.append("  ·  RAM ", style=DIM)
     l2.append(f"{mem.percent:.0f}%", style=FG)
     if agents is not None:
-        busy = sum(1 for a in agents if a["meta"].get("status") == "busy")
+        busy = sum(1 for a in agents if agent_status(a) == "busy")
         l2.append("  ·  агентов ", style=DIM)
         l2.append(str(len(agents)), style=YELLOW if agents else DIM)
         if busy:
@@ -600,6 +992,13 @@ def render_header(console: Console, agents: list[dict] | None = None) -> Panel:
     return Panel(grid, box=box.ROUNDED, border_style=DIM, padding=(0, 1))
 
 
+def agent_status(a: dict) -> str:
+    """Статус агента: собственный, если провайдер его публикует, иначе из транскрипта."""
+    return (a["meta"].get("status")
+            or TRACKER.get(a["meta"].get("sessionId", "")).get("status")
+            or "")
+
+
 def render_agents(agents: list[dict], today: dict, width: int) -> Group:
     parts: list = []
     tbl = Table(box=box.SIMPLE_HEAD, border_style=DIM, header_style=f"bold {DIM}",
@@ -607,7 +1006,7 @@ def render_agents(agents: list[dict], today: dict, width: int) -> Group:
     # в узком терминале лишние колонки только режут содержимое многоточиями
     show_proj = width >= 140
     show_extra = width >= 112
-    cols = [("", "left"), ("ИМЯ", "left"), ("ЗАДАЧА", "left")]
+    cols = [("", "left"), ("АГЕНТ", "left"), ("ИМЯ", "left"), ("ЗАДАЧА", "left")]
     if show_extra:
         cols.append(("МОДЕЛЬ", "left"))
     cols += [("АКТИВН.", "right"), ("ОТВ.", "right"), ("CPU", "right")]
@@ -616,26 +1015,30 @@ def render_agents(agents: list[dict], today: dict, width: int) -> Group:
     cols.append(("КОНТЕКСТ", "left"))
     if show_proj:
         cols.append(("ПРОЕКТ", "left"))
-    minw = {"ИМЯ": 12, "АКТИВН.": 7, "CPU": 5, "ОТВ.": 4, "КОНТЕКСТ": 18}
+    minw = {"АГЕНТ": 8, "ИМЯ": 12, "АКТИВН.": 7, "CPU": 5, "ОТВ.": 4,
+            "КОНТЕКСТ": 18}
     for col, just in cols:
         tbl.add_column(col, justify=just, no_wrap=True, min_width=minw.get(col))
 
     now = time.time()
     tot_rss = tot_cpu = 0.0
     for a in agents:
-        p, meta = a["proc"], a["meta"]
-        status = meta.get("status") or "—"
+        p, meta, prov = a["proc"], a["meta"], a.get("agent", "claude")
+        cwd = meta.get("cwd") or (p.cwd() if p.is_running() else "?")
+        rec = TRACKER.update(cwd, meta.get("sessionId", ""), prov, a.get("src", ""))
+        # claude публикует статус сам, codex выводится из task_started/complete,
+        # у остальных провайдеров его взять неоткуда
+        status = meta.get("status") or rec.get("status") or "—"
         dot_style, label = {
             "busy": (YELLOW, "busy"),
             "idle": (GREEN, "idle"),
             "shell": (CYAN, "shell"),
         }.get(status, (DIM, status))
         # статус пишется самой сессией; если давно не обновлялся — не верим ему
-        age_s = (now * 1000 - meta.get("statusUpdatedAt", 0)) / 1000
-        if status != "—" and age_s > 1800:
-            dot_style, label = DIM, f"{label}?"
-        cwd = meta.get("cwd") or (p.cwd() if p.is_running() else "?")
-        rec = TRACKER.update(cwd, meta.get("sessionId", ""))
+        if prov == "claude":
+            age_s = (now * 1000 - meta.get("statusUpdatedAt", 0)) / 1000
+            if status != "—" and age_s > 1800:
+                dot_style, label = DIM, f"{label}?"
         model, ctx, limit = rec["model"], rec["ctx"], rec["limit"]
         try:
             rss = p.memory_info().rss
@@ -646,10 +1049,13 @@ def render_agents(agents: list[dict], today: dict, width: int) -> Group:
         tot_cpu += cpu
 
         ctx_cell = Text()
-        if limit:
+        if limit and rec.get("ready"):
             ctx_cell.append_text(bar(ctx * 100 / limit, 8, lo=60, hi=80))
             ctx_cell.append(f" {htok(ctx)}", style=FG)
             ctx_cell.append(f"/{htok(limit)}", style=DIM)
+        elif rec.get("ready") and rec["inp"]:
+            # opencode копит токены за сессию и не сообщает размер окна
+            ctx_cell.append(f"{htok(rec['inp'])} вход", style=FG)
         else:
             ctx_cell.append("—", style=DIM)
 
@@ -663,8 +1069,10 @@ def render_agents(agents: list[dict], today: dict, width: int) -> Group:
         act_cell = Text(ago(act) if rec["mtime"] else "—",
                         style=GREEN if act < 60 else (FG if act < 600 else DIM))
         title_w = 36 if width >= 140 else (26 if width >= 118 else (22 if width >= 104 else 18))
-        row = [dot, Text(meta.get("name", "—"), style=f"bold {CYAN}"),
-               Text(clip(rec["title"] or "—", title_w), style=WHITE if rec["title"] else DIM)]
+        title = rec["title"] or meta.get("title") or ""
+        row = [dot, Text(prov, style=BLUE),
+               Text(meta.get("name", "—"), style=f"bold {CYAN}"),
+               Text(clip(title or "—", title_w), style=WHITE if title else DIM)]
         if show_extra:
             row.append(Text(model.replace("claude-", ""), style=PURPLE))
         row += [act_cell, str(rec["msgs"]), f"{cpu:.1f}%"]
@@ -676,9 +1084,13 @@ def render_agents(agents: list[dict], today: dict, width: int) -> Group:
         tbl.add_row(*row)
     parts.append(tbl)
 
-    busy = sum(1 for a in agents if a["meta"].get("status") == "busy")
+    busy = sum(1 for a in agents if agent_status(a) == "busy")
     summary = Text(" ")
     summary.append(f"{len(agents)} агент(ов)", style=f"bold {FG}")
+    kinds = Counter(a.get("agent", "?") for a in agents)
+    if len(kinds) > 1:
+        summary.append("  (" + ", ".join(f"{k} {n}" for k, n in
+                                         sorted(kinds.items())) + ")", style=DIM)
     if busy:
         summary.append(f"  busy {busy}", style=YELLOW)
     summary.append("   ·   ", style=DIM)
