@@ -1,6 +1,6 @@
 # mx-stat — system & AI agent monitor
 
-[Русская версия](README.ru.md) · MIT · Linux · Python 3.11+
+[Русская версия](README.ru.md) · MIT · Linux · macOS · Python 3.11+
 
 A full-screen terminal monitor (Textual, tokyo-night theme). Beyond the usual `htop` view
 it shows **live coding-agent sessions**: what each one is working on, which model, how much
@@ -43,6 +43,11 @@ mx stat -s         # one static snapshot (good for pipes / screenshots)
 
 `mx` is a thin wrapper — right now it knows a single subcommand, `stat`.
 
+Earlier installs (`~/.local/share/hstat`, `~/.local/share/MerxionStat`) are never deleted:
+`install.sh` moves them to `~/.local/share/<name>.bak-<date>` (the old `hstat` launcher goes
+to `~/.local/share/hstat-launcher.bak-<date>/`) and writes `~/.local/bin/hstat` as a
+compatibility alias for `mx stat`. The script runs on stock macOS bash 3.2 and BSD tools.
+
 Headless check (clicks through every tab, no terminal needed):
 
 ```sh
@@ -56,7 +61,7 @@ Headless check (clicks through every tab, no terminal needed):
 | **1 Overview** | CPU as a table (cores as columns, USER/SYS, per-core history, P/E clusters, threads, syscalls, top processes), memory with top RAM consumers, power/battery, agent table, today's tokens with a pulse, network, disk |
 | **2 Agents** | Wide session table (branch, permission mode, cli/sdk type, prompts, tools, tokens), details for the selected session (task, last request, effort, last tool, cache hit), hourly output-token histogram, 7 days |
 | **3 Processes** | Top 60 processes; `s` cycles sorting CPU → memory → threads → age; `f` filters to claude only |
-| **4 System** | Machine, kernel, load, memory, network, battery; Claude Code card (versions, transcripts, MCP); volumes; podman/docker containers |
+| **4 System** | Machine, kernel, load, memory, network, battery; Claude Code card (versions, transcripts, MCP); volumes; podman/docker/OrbStack containers |
 | **5 Network** | Route, DNS, VPN tunnels, TCP by state, per-interface throughput, listening ports with owning process |
 | **1 Overview** — ⚡ POWER card | Live draw per node: CPU (RAPL counters), each GPU (nvidia-smi), integrated graphics (hwmon), total and a ~3 minute graph. Disks, RAM, board and PSU are not measured — no sensors exist |
 | **1 Overview** — 🌡 TEMPERATURE card | Every sensor: CPU and its dies (k10temp), each GPU, integrated graphics, network chip; hottest node and a ~3 minute graph. Disk temperatures would need smartctl — not used |
@@ -114,6 +119,14 @@ and per-session token counters. That table holds dozens of rows even when the da
 hundreds of megabytes, and it is opened read-only. opencode records no context-window size,
 so the accumulated input is shown in place of a context bar.
 
+## Platforms
+
+Everything OS-specific lives in a platform layer with one interface:
+`share/platform_linux.py` and `share/platform_macos.py`, picked by `sys.platform` in exactly
+one place — `share/platforms.py`. The TUI, the snapshot and all agent logic are shared;
+cards adapt to the data (on a Mac the temperature card shows the battery, the core table
+shows P/E clusters), not to `if darwin` branches.
+
 ## Where the system data comes from (Linux)
 
 Read straight from the kernel; no daemons required:
@@ -130,10 +143,39 @@ Read straight from the kernel; no daemons required:
 - **GPUs** — `nvidia-smi` (utilisation, VRAM, temperature, clocks, processes). Without an
   NVIDIA card tab 6 is empty.
 
+## Where the system data comes from (macOS)
+
+Stock tools only, no root and no extra packages:
+
+- **CPU, model, kernel** — `sysctl` (`machdep.cpu.brand_string`, `hw.model`, `kern.version`,
+  `hw.perflevel0/1.logicalcpu`); host name from `scutil --get ComputerName`.
+- **P/E clusters** — `cluster-type` of each core from the device tree
+  (`ioreg -p IODeviceTree`). On Apple Silicon the efficiency cores come first (on an M1
+  cpu0–3 are E), so "the first N are performance cores" would be wrong.
+- **Memory** — psutil plus `vm_stat` for memory held by the compressor; wired is shown
+  instead of the Linux page cache.
+- **Disks** — only `/System/Volumes/Data` and `/Volumes/*`: the system volume is mounted twice
+  (read-only snapshot at `/` and the writable Data volume) and only Data shows real usage.
+- **Battery, power, temperature** — `ioreg -rn AppleSmartBattery`: cycles, health
+  (`AppleRawMaxCapacity / DesignCapacity`), battery temperature, and whole-machine draw from
+  `PowerTelemetryData.SystemLoad`. Per-component CPU/GPU power and SoC temperatures need root
+  (`powermetrics`), so they are not shown; the temperature card shows the battery.
+- **Network** — `route -n get default`, DNS from `scutil --dns`, Wi-Fi via `networksetup`
+  (recent macOS hides the SSID without location access). Byte counters come from
+  `netstat -ib`, read from the end of the line, because psutil returns truncated counters on
+  macOS. TCP states from `netstat -an -p tcp`, listening ports from `lsof` (process names
+  are taken from psutil — lsof cuts them to 9 characters). VPN tunnels are `utun*`.
+- **Containers** — if OrbStack is installed, `orb status` first and `docker ps` only when it
+  is already running (any docker call would start OrbStack); otherwise podman/docker.
+
 ## Files
 
 ```
-share/core.py       data collection, SessionTracker, logo, static rendering (rich)
+share/core.py       agents, SessionTracker, logo, static rendering (rich)
+share/platforms.py  picks the platform layer by sys.platform (the only OS switch)
+share/platform_linux.py   system data on Linux (/proc, /sys, ip, nmcli, RAPL)
+share/platform_macos.py   system data on macOS (sysctl, ioreg, netstat, lsof, scutil)
+share/platform_common.py  helpers shared by both layers
 share/tui.py        Textual app: 6 tabs, adaptive columns, live updates
 share/snapshot.py   the mx stat -s / -w mode
 share/mxstat.py     entry point (the launcher invokes it through the venv)
