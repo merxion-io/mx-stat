@@ -15,7 +15,8 @@ Your job: install it, verify it, and tell the user how to run it.
    writes a launcher at `~/.local/bin/mx`. Requires Python 3.11+; if it is missing but `uv`
    is present, uv will fetch a suitable Python itself.
    If an earlier version is installed under the names `hstat` or `MerxionStat`, `install.sh`
-   removes it automatically.
+   moves it to a backup (`~/.local/share/<name>.bak-<date>`, nothing is deleted) and writes
+   `~/.local/bin/hstat` as an alias for `mx stat`.
 
 2. **Check PATH.** If `install.sh` warned that `~/.local/bin` is not on PATH:
    ```sh
@@ -52,14 +53,17 @@ Your job: install it, verify it, and tell the user how to run it.
 | Agents show `…` instead of context for the first few seconds | Normal: the transcript tracker is warming up in the background |
 | Everything works but the CONTAINERS card is empty | Neither `podman` nor `docker` is installed. That card is optional |
 | Empty POWER / TEMPERATURE cards, or an empty GPU tab | The corresponding sensors are absent: RAPL in `/sys/class/powercap`, hwmon, `nvidia-smi`. Not a bug |
-| Not Linux | This is the Linux build: the macOS code was removed and data comes from `/proc`, `/sys`, `/etc`. It will not run meaningfully elsewhere |
+| macOS: only the battery in TEMPERATURE, only the whole machine in POWER | Expected: SoC sensors need root (`powermetrics`); without root the battery controller is the only source |
+| Neither Linux nor macOS | Not supported: the platform layer exists for Linux (`share/platform_linux.py`) and macOS (`share/platform_macos.py`) only |
 
 ## Layout after installation
 
 ```
 ~/.local/bin/mx                    launcher (sh → venv python → mxstat.py)
 ~/.local/share/mx-stat/mxstat.py   entry point
-~/.local/share/mx-stat/core.py     data + SessionTracker + logo (LOGO/BRAND/WHITE)
+~/.local/share/mx-stat/core.py     agents + SessionTracker + logo (LOGO/BRAND/WHITE)
+~/.local/share/mx-stat/platform_*.py  system data per OS (picked in platforms.py)
+~/.local/bin/hstat                 compatibility alias for `mx stat`
 ~/.local/share/mx-stat/tui.py      Textual application
 ~/.local/share/mx-stat/snapshot.py the -s mode
 ~/.local/share/mx-stat/venv/       environment

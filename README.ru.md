@@ -1,9 +1,6 @@
-> **Linux-версия.** Оригинал писался под macOS; здесь mac-код вырезан целиком,
-> данные берутся из psutil, `/proc`, `/sys`, `/etc` и `ip`/`nmcli`/`podman`.
-
 # mx-stat — монитор системы и AI-агентов
 
-[English version](README.md) · MIT · Linux · Python 3.11+
+[English version](README.md) · MIT · Linux · macOS · Python 3.11+
 
 Полноэкранный live-монитор в терминале (Textual, тема tokyo-night) с белым логотипом
 MERXION в шапке. Кроме обычного «htop» показывает **живые сессии кодовых агентов**: что за
@@ -40,6 +37,11 @@ mx stat -s         # статичный снимок (для пайпов / ск
 (через `uv`, если он есть, иначе `python3 -m venv`) и пишет лаунчер `~/.local/bin/mx`.
 Нужен Python 3.11+. Пути переопределяются переменными `MXSTAT_HOME` и `MXSTAT_BIN`.
 Команда `mx` — тонкая обёртка: сейчас она знает единственную подкоманду `stat`.
+
+Прежние установки (`~/.local/share/hstat`, `~/.local/share/MerxionStat`) не удаляются:
+`install.sh` переносит их в `~/.local/share/<имя>.bak-<дата>` (старый лаунчер `hstat` —
+в `~/.local/share/hstat-launcher.bak-<дата>/`) и пишет `~/.local/bin/hstat` как совместимый
+алиас на `mx stat`. Скрипт работает на штатном bash 3.2 и BSD-утилитах macOS.
 
 Проверка без терминала (headless, прощёлкивает все вкладки):
 
@@ -111,6 +113,14 @@ Rollout-ы дорастают до десятков мегабайт, поэто
 открывается она только на чтение. Размер окна контекста opencode не пишет, поэтому вместо
 шкалы показывается накопленный ввод.
 
+## Платформы
+
+Всё, что зависит от ОС, вынесено в платформенный слой с одним интерфейсом:
+`share/platform_linux.py` и `share/platform_macos.py`, выбор по `sys.platform` ровно в одном
+месте — `share/platforms.py`. TUI, снимок и вся логика агентов общие; карточки
+подстраиваются под данные (на Mac карточка температур показывает батарею, таблица ядер —
+P/E-кластеры), а не под ветки `if darwin`.
+
 ## Откуда берутся системные данные (Linux)
 
 Всё читается напрямую из ядра, внешних демонов не требуется:
@@ -127,11 +137,40 @@ Rollout-ы дорастают до десятков мегабайт, поэто
 - **Видеокарты** — `nvidia-smi` (загрузка, видеопамять, температура, частоты, процессы).
   Без NVIDIA вкладка 6 пустая.
 
+## Откуда берутся системные данные (macOS)
+
+Только штатные утилиты, без root и без дополнительных пакетов:
+
+- **Процессор, модель, ядро** — `sysctl` (`machdep.cpu.brand_string`, `hw.model`,
+  `kern.version`, `hw.perflevel0/1.logicalcpu`); имя машины — `scutil --get ComputerName`.
+- **P/E-кластеры** — `cluster-type` каждого ядра из дерева устройств
+  (`ioreg -p IODeviceTree`). На Apple Silicon первыми идут энергоэффективные ядра (на M1
+  cpu0–3 — E), так что «первые N — производительные» было бы неверно.
+- **Память** — psutil плюс `vm_stat` для сжатого компрессором; вместо страничного кэша
+  Linux показывается wired.
+- **Диски** — только `/System/Volumes/Data` и `/Volumes/*`: системный том смонтирован дважды
+  (ro-снапшот в `/` и rw-том Data), реальное заполнение видно только у Data.
+- **Батарея, энергия, температура** — `ioreg -rn AppleSmartBattery`: циклы, здоровье
+  (`AppleRawMaxCapacity / DesignCapacity`), температура батареи и потребление всей машины из
+  `PowerTelemetryData.SystemLoad`. Мощность и температуры CPU/GPU по отдельности требуют root
+  (`powermetrics`), поэтому не показываются; в карточке температур — батарея.
+- **Сеть** — `route -n get default`, DNS из `scutil --dns`, Wi-Fi через `networksetup`
+  (новые macOS прячут имя сети без доступа к геопозиции). Счётчики байт — из `netstat -ib`,
+  поля считаются с конца строки: psutil на macOS отдаёт обрезанные значения. Состояния TCP —
+  `netstat -an -p tcp`, слушающие порты — `lsof` (имя процесса берётся через psutil: lsof
+  режет его до 9 символов). VPN-туннели — `utun*`.
+- **Контейнеры** — если стоит OrbStack, сначала `orb status`, и `docker ps` только когда он
+  уже запущен (любой вызов docker поднял бы OrbStack); иначе podman/docker.
+
 ## Файлы
 
 ```
-share/core.py      сбор данных, SessionTracker, логотип, статичная отрисовка (rich)
-share/tui.py       приложение Textual: 5 вкладок, адаптивные колонки, live-обновление
+share/core.py      агенты, SessionTracker, логотип, статичная отрисовка (rich)
+share/platforms.py выбор платформенного слоя по sys.platform (единственная развилка по ОС)
+share/platform_linux.py   системные данные на Linux (/proc, /sys, ip, nmcli, RAPL)
+share/platform_macos.py   системные данные на macOS (sysctl, ioreg, netstat, lsof, scutil)
+share/platform_common.py  общие мелочи обоих слоёв
+share/tui.py       приложение Textual: 6 вкладок, адаптивные колонки, live-обновление
 share/snapshot.py  режим mx stat -s / -w
 share/mxstat.py    точка входа (лаунчер вызывает её через venv)
 bin/mx             пример shell-лаунчера (install.sh пишет свой с абсолютными путями)

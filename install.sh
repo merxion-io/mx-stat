@@ -4,7 +4,11 @@
 #   ./install.sh                → ~/.local/share/mx-stat + лаунчер ~/.local/bin/mx
 #   MXSTAT_HOME=… MXSTAT_BIN=…  → другие пути
 #
-# Нужен Python 3.11+ (venv создаётся через uv, если он есть, иначе python3 -m venv).
+# Работает на Linux и macOS (bash 3.2, BSD-утилиты). Нужен Python 3.11+
+# (venv создаётся через uv, если он есть, иначе python3 -m venv).
+#
+# Прежние установки (hstat, MerxionStat) не удаляются, а переносятся в бэкап
+# ~/.local/share/<имя>.bak-<дата>; ~/.local/bin/hstat становится алиасом на `mx stat`.
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -63,17 +67,47 @@ say "Лаунчер: $BIN/mx"
 "$BIN/mx" stat -h >/dev/null || die "лаунчер не запускается"
 "$DEST/venv/bin/python" -c "import textual, psutil, rich; print('   textual', textual.__version__, '· psutil', psutil.__version__)"
 
-# ── уборка прежних установок (hstat, MerxionStat) ──
-if [ -e "$BIN/hstat" ]; then
-    rm -f "$BIN/hstat"
-    say "Удалён старый лаунчер: $BIN/hstat"
-fi
+# ── прежние установки (hstat, MerxionStat): не удаляем, а переносим в бэкап ──
+STAMP="$(date +%Y%m%d-%H%M%S)"
+HSTAT_MARK="mx-stat: совместимый алиас"
+
+backup_path() {   # свободное имя <путь>.bak-<дата>[-N]
+    local base="$1.bak-$STAMP" cand n=1
+    cand="$base"
+    while [ -e "$cand" ] || [ -L "$cand" ]; do
+        cand="$base-$n"
+        n=$((n + 1))
+    done
+    printf '%s\n' "$cand"
+}
+
 for OLD in "$HOME/.local/share/hstat" "$HOME/.local/share/MerxionStat"; do
     if [ -d "$OLD" ] && [ "$OLD" != "$DEST" ]; then
-        rm -rf "$OLD"
-        say "Удалён старый каталог: $OLD"
+        BAK="$(backup_path "$OLD")"
+        mv "$OLD" "$BAK"
+        say "Старый каталог перенесён в бэкап: $BAK"
     fi
 done
+
+# старый лаунчер hstat — тоже в бэкап, если это не наш же алиас
+if [ -e "$BIN/hstat" ] || [ -L "$BIN/hstat" ]; then
+    if ! grep -q "$HSTAT_MARK" "$BIN/hstat" 2>/dev/null; then
+        BAK="$(backup_path "$HOME/.local/share/hstat-launcher")"
+        mkdir -p "$BAK"
+        mv "$BIN/hstat" "$BAK/hstat"
+        say "Старый лаунчер перенесён в бэкап: $BAK/hstat"
+    fi
+fi
+
+# hstat — совместимый алиас на `mx stat` с теми же ключами (-s, -w, --no-color)
+cat > "$BIN/hstat" <<EOF
+#!/bin/sh
+# $HSTAT_MARK: hstat → mx stat (ставит install.sh из mx-stat)
+exec "$BIN/mx" stat "\$@"
+EOF
+chmod +x "$BIN/hstat"
+"$BIN/hstat" -h >/dev/null || die "алиас hstat не запускается"
+say "Алиас: $BIN/hstat → mx stat"
 
 case ":$PATH:" in
     *":$BIN:"*) ;;
