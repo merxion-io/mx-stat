@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import os
-import platform
-import re
 import time
 from collections import deque
 from datetime import datetime
@@ -145,11 +143,11 @@ class Sampler:
         self.transcripts = (0, 0)
         self.mcp: list[str] = core.mcp_servers()
         self.batt = None
-        self.batt_extra = ""
+        self.batt_extra: list[tuple[str, str]] = []
         self.batt_at = 0.0
         self.disks: list = []
         self.disks_at = 0.0
-        self.containers = ("—", [])
+        self.containers: dict | None = None
         self.meter = core.PowerMeter()
         self.power = {"rows": [], "total": 0.0, "denied": False}
         self.temps: list[tuple[str, float, float | None]] = []
@@ -320,26 +318,10 @@ class Sampler:
         self.batt = psutil.sensors_battery()
         if self.batt is None:
             return
-        self.batt_extra = core.battery_extra()
+        self.batt_extra = core.battery_facts()
 
     def _sample_disks(self) -> None:
-        out = []
-        seen = set()
-        for part in psutil.disk_partitions(all=False):
-            mp = part.mountpoint
-            if not part.device.startswith("/dev/"):
-                continue
-            if part.device in seen:
-                continue
-            try:
-                u = psutil.disk_usage(mp)
-            except OSError:
-                continue
-            if u.total < (1 << 30):
-                continue
-            seen.add(part.device)
-            out.append(("система" if mp == "/" else os.path.basename(mp), u))
-        self.disks = out
+        self.disks = core.disk_volumes()
 
     # ── тяжёлое, в отдельных потоках ──
     def scan_slow(self) -> None:
@@ -357,13 +339,7 @@ class Sampler:
                 continue
 
     def scan_containers(self) -> None:
-        cli = core.container_cli()
-        rows = []
-        if cli:
-            out = core.sh([cli, "ps", "--format",
-                           "{{.Names}}\t{{.Status}}\t{{.Image}}"], timeout=8)
-            rows = [l.split("\t") for l in out.splitlines() if l.count("\t") == 2]
-        self.containers = (cli or "нет движка", rows)
+        self.containers = core.containers()
 
     def scan_gpu(self) -> None:
         """Опрос nvidia-smi (дорогой вызов, поэтому в потоке и раз в 2 с)."""
@@ -437,10 +413,10 @@ class MxStat(App):
         self.interval = 1.0
         self.sort_idx = 0
         self.only_claude = False
-        self.host = platform.node() or os.uname().nodename
+        self.host = core.host_name() or os.uname().nodename
         self.chip = core.cpu_brand()
         self.osver = core.os_label()
-        self.model_name = platform.machine()
+        self.model_name = core.machine_model()
 
     # ── разметка ──
     def compose(self) -> ComposeResult:
@@ -699,7 +675,8 @@ class MxStat(App):
             if tot > 0:
                 user, sysp = (tc.user + tc.nice) * 100 / tot, tc.system * 100 / tot
         t = Text()
-        t.append_text(self._fit(Text(f"C{i}", style=PURPLE), 5))
+        prefix, style = core.core_label(i, len(s.percpu))
+        t.append_text(self._fit(Text(f"{prefix}{i}", style=style), 5))
         t.append_text(core.bar(v, bw))
         t.append_text(self._fit(Text(f"{v:.0f}%", style=FG), 5, "right"))
         t.append_text(self._fit(Text(f"{user:.0f}%", style=DIM), 6, "right"))
@@ -731,9 +708,15 @@ class MxStat(App):
         rows.append(Text(""))
 
         # ── таблица ядер: одна или две колонки по ширине ──
-        half = (n + 1) // 2                      # две колонки — просто пополам
-        p_idx = list(range(half))
-        e_idx = list(range(half, n))
+        # группы ядер решает платформа: P/E-кластеры на Apple Silicon,
+        # одна группа на x86 — тогда две колонки просто пополам
+        groups = core.OS.cpu_groups(n)
+        if len(groups) > 1:
+            (p_name, _, p_idx), (e_name, _, e_idx) = groups[0], groups[1]
+        else:
+            half = (n + 1) // 2
+            p_name = e_name = groups[0][0]
+            p_idx, e_idx = list(range(half)), list(range(half, n))
         two = bool(w >= 86 and p_idx and e_idx)
         colw = (w - 3) // 2 if two else w
         fixed = 5 + 5 + 6 + 6
@@ -763,9 +746,9 @@ class MxStat(App):
 
         if two:
             left = [header()] + [self._core_line(i, bw, sw) for i in p_idx] + \
-                   [cluster("ядра", p_idx, CYAN)]
+                   [cluster(p_name, p_idx, CYAN)]
             right = [header()] + [self._core_line(i, bw, sw) for i in e_idx] + \
-                    [cluster("ядра", e_idx, PURPLE)]
+                    [cluster(e_name, e_idx, PURPLE)]
             for k in range(max(len(left), len(right))):
                 merged = Text()
                 l = left[k] if k < len(left) else Text("")
@@ -777,7 +760,11 @@ class MxStat(App):
         else:
             rows.append(header())
             rows += [self._core_line(i, bw, sw) for i in range(n)]
-            rows.append(cluster("все ядра", list(range(n)), CYAN))
+            if len(groups) > 1:
+                rows.append(cluster(p_name, p_idx, CYAN))
+                rows.append(cluster(e_name, e_idx, PURPLE))
+            else:
+                rows.append(cluster("все ядра", list(range(n)), CYAN))
         rows.append(Text(""))
 
         # ── потоки и ядро ОС ──
@@ -786,7 +773,7 @@ class MxStat(App):
         per_core = threads / max(1, n)
         rows.append(line("load", f"{la[0]:.2f} / {la[1]:.2f} / {la[2]:.2f}",
                          (f"{freq.current:.0f} МГц  ·  " if freq else "")
-                         + f"{psutil.cpu_count(logical=False) or '?'} ядер / {n} потоков",
+                         + core.cpu_summary(),
                          lw=8))
         rows.append(line("потоки", f"{hnum(threads)}",
                          f"процессов {len(s.procs)}  ·  {per_core:.0f} на ядро  ·  "
@@ -830,7 +817,7 @@ class MxStat(App):
             Text(""),
             line("исп.", f"{hbytes(m.total - m.available)} / {hbytes(m.total)}", lw=10),
             line("активная", hbytes(m.active), lw=10),
-            line("кэш", hbytes(m.cached + m.buffers), lw=10),
+            *(line(label, hbytes(v), lw=10) for label, v in core.memory_extra(m)),
             line("свободно", hbytes(m.available), lw=10),
             line("swap", f"{hbytes(sw.used)} / {hbytes(sw.total)}", lw=10),
             Text(""),
@@ -861,7 +848,7 @@ class MxStat(App):
             t.append_text(self._fit(Text(val, style=FG), vw, "right"))
             rows.append(t)
         if pw["denied"]:
-            rows.append(Text("CPU — нет доступа к RAPL", style=YELLOW))
+            rows.append(Text(pw["denied_note"][1], style=YELLOW))
         tot = Text()
         tot.append(f"{'ИТОГО':<{lw}}", style=f"bold {DIM}")
         tot.append_text(self._fit(Text(f"{pw['total']:.1f} Вт", style=f"bold {FG}"),
@@ -873,8 +860,8 @@ class MxStat(App):
         g.append_text(spark(s.hist["pwr"], width=max(8, w - lw - len(note)), color=CYAN))
         g.append(note, style=DIM)
         rows.append(g)
-        rows.append(Text("не измерены: диски, ОЗУ, плата" if w >= 30
-                         else "без дисков и ОЗУ", style=DIM))
+        note = pw.get("note") or core.OS.POWER_NOTE
+        rows.append(Text(note[1] if w >= 30 else note[2], style=DIM))
         rows.append(Text(""))
 
         if s.batt:
@@ -887,8 +874,8 @@ class MxStat(App):
             rows.append(line("режим", state, lw=12))
             if b.secsleft and b.secsleft > 0 and b.secsleft != psutil.POWER_TIME_UNLIMITED:
                 rows.append(line("осталось", f"{b.secsleft // 3600}:{(b.secsleft % 3600) // 60:02d}", lw=12))
-            if s.batt_extra:
-                rows.append(line("ресурс", s.batt_extra.strip(), lw=12))
+            for label, val in s.batt_extra:
+                rows.append(line(label, val, lw=12))
         else:
             rows.append(Text("батарея не найдена", style=DIM))
         rows.append(Text(""))
@@ -1230,13 +1217,14 @@ class MxStat(App):
         w = self._card_width("c-sys", 120)
         rows = [
             line("машина", f"{self.host}  ·  {self.chip}  ·  {self.model_name}", lw=14),
-            line("ядра", f"{psutil.cpu_count(logical=False) or '?'} физ."
-                         f"  (всего {psutil.cpu_count()})", lw=14),
+            line("ядра", f"{core.cpu_summary(short=True)}  (всего {psutil.cpu_count()})",
+                 lw=14),
             line("система", f"{self.osver}  ·  {s.kernel}", lw=14),
             line("загружена", f"{boot}  ·  аптайм {dur(time.time() - psutil.boot_time())}", lw=14),
             line("память", f"{hbytes(m.total - m.available)} из {hbytes(m.total)}"
-                           f"  ·  кэш {hbytes(m.cached + m.buffers)}"
-                           f"  ·  swap {hbytes(s.swap.used)}", lw=14),
+                           + "".join(f"  ·  {label} {hbytes(v)}"
+                                     for label, v in core.memory_extra(m))
+                           + f"  ·  swap {hbytes(s.swap.used)}", lw=14),
             line("процессы", f"{len(s.procs)} процессов  ·  "
                              f"{sum(p['threads'] for p in s.procs)} потоков", lw=14),
             line("сеть", f"{s.iface or '—'}  ·  шлюз {s.gw or '—'}  ·  DNS {', '.join(s.dns) or '—'}"
@@ -1244,7 +1232,8 @@ class MxStat(App):
                          f"{s.tcp.get('LISTEN', 0)} слушают", lw=14),
         ]
         if s.batt:
-            rows.append(line("батарея", f"{s.batt.percent:.0f}%{s.batt_extra}", lw=14))
+            facts = "".join(f"  ·  {k} {v}" for k, v in s.batt_extra)
+            rows.append(line("батарея", f"{s.batt.percent:.0f}%{facts}", lw=14))
         self.query_one("#c-sys", Static).update(joined(rows, w))
 
         versions = sorted({a["version"] for a in s.agents})
@@ -1274,10 +1263,14 @@ class MxStat(App):
         self.query_one("#c-disks", Static).update(
             joined(drows, w) if drows else Text("—", style=DIM))
 
-        cli, containers = s.containers
-        xrows = [line(cli, Text(f"{len(containers)} контейнер(ов)" if containers
-                                else "нет запущенных",
-                                style=GREEN if containers else DIM), lw=12)]
+        info = s.containers or {"engine": "нет движка", "state": "", "rows": []}
+        containers = info["rows"]
+        if info["state"]:
+            status = Text(info["state"], style=YELLOW)
+        else:
+            status = Text(f"{len(containers)} контейнер(ов)" if containers else "нет запущенных",
+                          style=GREEN if containers else DIM)
+        xrows = [line(info["engine"], status, lw=12)]
         for c in containers[:15]:
             xrows.append(line("  " + c[0][:18], c[1], c[2], lw=20))
         self.query_one("#c-cont", Static).update(joined(xrows, w))
@@ -1504,7 +1497,7 @@ class MxStat(App):
                 kind = ("vpn" if addr.startswith(("10.8.", "10.9."))
                         else "tailscale" if addr.startswith("100.")
                         else "туннель")
-            elif name == "lo":
+            elif name == core.OS.LOOPBACK:
                 kind = "loopback"
             elif name == s.iface:
                 kind = "основной"
@@ -1518,7 +1511,7 @@ class MxStat(App):
 
         pt = self.query_one("#t-ports", DataTable)
         pt.clear()
-        known = {8787: "jarvis", 5000: "AirPlay", 7000: "AirPlay", 21118: "RustDesk",
+        known = {8787: "assistant", 5000: "AirPlay", 7000: "AirPlay", 21118: "RustDesk",
                  22: "ssh", 80: "http", 443: "https", 5432: "postgres", 6379: "redis",
                  3000: "dev-сервер", 8080: "http-alt", 11434: "ollama"}
         for port, host, name, pid, hint in s.ports:
@@ -1529,7 +1522,7 @@ class MxStat(App):
                        Text(name, style=FG), str(pid),
                        Text(label + ("" if local else "  ·  снаружи"),
                             style=YELLOW if exposed else (FG if hint else DIM)))
-        pt.border_subtitle = f"{len(s.ports)} слушающих сокетов · lsof"
+        pt.border_subtitle = f"{len(s.ports)} слушающих сокетов · {core.OS.PORTS_SOURCE}"
 
 
 def main() -> int:

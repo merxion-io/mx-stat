@@ -2,15 +2,15 @@
 """Merxion Stat · core — сбор системных данных и статичная отрисовка через rich.
 
 Общая база для снапшота (mx stat -s) и полноэкранного TUI (mx stat).
-Линуксовая версия: данные берутся из psutil, /proc, /etc и ip/podman."""
+Всё, что зависит от ОС (Linux / macOS), вынесено в платформенный слой —
+platform_linux.py и platform_macos.py, выбор в platforms.py; здесь только
+общая логика: агенты, токены, сборка и отрисовка."""
 from __future__ import annotations
 
 import json
 import os
-import platform
 import re
 import sqlite3
-import subprocess
 import threading
 import time
 from collections import Counter
@@ -27,14 +27,34 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from platform_common import sh
+from platforms import OS
+
 HOME = Path.home()
 CLAUDE = HOME / ".claude"
 CODEX = HOME / ".codex"
 CODEX_TAIL = 4 << 20        # сколько хвоста rollout-а разбираем на первом проходе
 CODEX_BLOCK = 8 << 20       # шаг побайтового счёта ответов
 OPENCODE_DB = HOME / ".local/share/opencode/opencode.db"
-# префиксы имён интерфейсов, которые считаем VPN-туннелями
-VPN_PREFIXES = ("wg", "tun", "tap", "tailscale", "ppp")
+# префиксы имён интерфейсов, которые считаем VPN-туннелями (у каждой ОС свои)
+VPN_PREFIXES = OS.VPN_PREFIXES
+
+# ── системные данные — из платформенного слоя, под привычными именами ──
+host_name = OS.host_name
+cpu_brand = OS.cpu_brand
+os_label = OS.os_label
+kernel_short = OS.kernel_short
+machine_model = OS.machine_model
+default_iface = OS.default_iface
+net_counters = OS.net_counters
+dns_servers = OS.dns_servers
+wifi_ssid = OS.wifi_ssid
+tcp_summary = OS.tcp_summary
+battery_facts = OS.battery_facts
+memory_extra = OS.memory_extra
+cpu_summary = OS.cpu_summary
+containers = OS.containers
+PowerMeter = OS.PowerMeter
 
 # ─────────────────────────── палитра tokyo-night ───────────────────────────
 FG, DIM = "#c0caf5", "#565f89"
@@ -54,16 +74,6 @@ LOGO_W = len(LOGO[0])
 def logo_lines(style: str = f"bold {WHITE}") -> list[Text]:
     """Двухстрочный блочный логотип MERXION (белый по умолчанию)."""
     return [Text(ln, style=style) for ln in LOGO]
-
-
-def sh(cmd: list[str] | str, timeout: float = 3.0) -> str:
-    """Тихо выполнить команду, вернуть stdout ('' при любой ошибке)."""
-    try:
-        r = subprocess.run(cmd, shell=isinstance(cmd, str), capture_output=True,
-                           text=True, timeout=timeout)
-        return r.stdout.strip()
-    except Exception:
-        return ""
 
 
 def hbytes(n: float) -> str:
@@ -945,15 +955,14 @@ def mcp_servers() -> list[str]:
 def listening_ports() -> list[tuple[int, str, str, int, str]]:
     """[(порт, адрес, процесс, pid, подсказка)] — кто слушает TCP на этой машине.
 
-    Сокеты читаются из /proc через psutil. Без root ядро отдаёт pid только
-    для своих процессов — у чужих слушателей имя останется «—»."""
+    Сокеты отдаёт платформенный слой (psutil на Linux, lsof на macOS); имя и
+    подсказку (скрипт из cmdline) берём через psutil — lsof режет имена до 9
+    символов. Без root ядро Linux отдаёт pid только для своих процессов —
+    у чужих слушателей имя останется «—»."""
     out = []
     seen = set()
     names: dict[int, tuple[str, str]] = {}
-    for c in tcp_connections():
-        if c.status != psutil.CONN_LISTEN or not c.laddr:
-            continue
-        port_i, host, pid_i = c.laddr.port, c.laddr.ip, c.pid or 0
+    for port_i, host, pid_i in OS.listening_sockets():
         key = (port_i, host, pid_i)
         if key in seen:
             continue
@@ -978,59 +987,6 @@ def listening_ports() -> list[tuple[int, str, str, int, str]]:
     return out
 
 
-def tcp_connections() -> list:
-    """Все TCP-сокеты машины ([] если ядро не дало прочитать)."""
-    try:
-        return psutil.net_connections(kind="tcp")
-    except (psutil.Error, OSError):
-        return []
-
-
-def tcp_summary() -> dict[str, int]:
-    """Счётчики TCP-соединений по состояниям (ESTABLISHED, TIME_WAIT, …)."""
-    return dict(Counter(c.status for c in tcp_connections()))
-
-
-def dns_servers() -> list[str]:
-    out = []
-    try:
-        txt = Path("/etc/resolv.conf").read_text()
-    except OSError:
-        txt = ""
-    for m in re.finditer(r"^nameserver\s+(\S+)", txt, re.M):
-        if m.group(1) not in out:
-            out.append(m.group(1))
-    return out[:3]
-
-
-def cpu_brand() -> str:
-    """Модель процессора из /proc/cpuinfo."""
-    try:
-        m = re.search(r"^model name\s*:\s*(.+)$",
-                      Path("/proc/cpuinfo").read_text(), re.M)
-        if m:
-            return m.group(1).strip()
-    except OSError:
-        pass
-    return platform.processor() or platform.machine()
-
-
-def os_label() -> str:
-    """Короткое имя дистрибутива для шапки."""
-    try:
-        m = re.search(r'^PRETTY_NAME="?([^"\n]+)"?',
-                      Path("/etc/os-release").read_text(), re.M)
-        if m:
-            return m.group(1)
-    except OSError:
-        pass
-    return f"{platform.system()} {platform.release()}"
-
-
-def kernel_short() -> str:
-    return f"Linux {platform.release()}"
-
-
 def transcripts_size() -> tuple[int, int]:
     """(файлов, байт) во всех транскриптах Claude Code."""
     n = total = 0
@@ -1047,7 +1003,7 @@ def transcripts_size() -> tuple[int, int]:
 
 # ═══════════════════════════ отрисовка секций ══════════════════════════════
 def render_header(console: Console, agents: list[dict] | None = None) -> Panel:
-    host = platform.node()
+    host = host_name()
     chip = cpu_brand()
     ram = psutil.virtual_memory().total >> 30
     up = dur(time.time() - psutil.boot_time())
@@ -1252,8 +1208,17 @@ def render_agents(agents: list[dict], today: dict, width: int) -> Group:
     return Group(*parts)
 
 
+def core_label(i: int, n: int) -> tuple[str, str]:
+    """(префикс, цвет) ядра: P/E-кластеры Apple Silicon или просто C."""
+    groups = OS.cpu_groups(n)
+    colors = (CYAN, PURPLE) if len(groups) > 1 else (PURPLE,)
+    for k, (_, prefix, idx) in enumerate(groups):
+        if i in idx:
+            return prefix, colors[k % len(colors)]
+    return "C", PURPLE
+
+
 def render_cpu(percpu: list[float], width: int) -> Group:
-    total = psutil.cpu_count() or len(percpu)
     overall = sum(percpu) / len(percpu) if percpu else 0.0
     la1, la5, la15 = psutil.getloadavg()
     freq = psutil.cpu_freq()
@@ -1264,8 +1229,9 @@ def render_cpu(percpu: list[float], width: int) -> Group:
 
     cells = []
     for i, v in enumerate(percpu):
+        prefix, style = core_label(i, len(percpu))
         c = Text()
-        c.append(f"C{i}", style=PURPLE)
+        c.append(f"{prefix}{i}", style=style)
         c.append(" ")
         c.append_text(bar(v, 9))
         c.append(f" {v:>4.0f}%", style=DIM)
@@ -1307,8 +1273,8 @@ def render_memory(width: int) -> Group:
     m = psutil.virtual_memory()
     sw = psutil.swap_memory()
     used = m.total - m.available
-    note = (f"кэш {hbytes(m.cached + m.buffers)}   swap {hbytes(sw.used)}   "
-            f"свободно {hbytes(m.available)}")
+    extra = "   ".join(f"{label} {hbytes(v)}" for label, v in memory_extra(m))
+    note = f"{extra}   swap {hbytes(sw.used)}   свободно {hbytes(m.available)}"
     top = []
     for p in psutil.process_iter(["name", "memory_info"]):
         mi = p.info["memory_info"]
@@ -1330,62 +1296,32 @@ def render_memory(width: int) -> Group:
     return Group(*rows)
 
 
-def render_disk(width: int) -> Group:
-    rows = []
+def disk_volumes() -> list[tuple[str, object]]:
+    """[(имя, disk_usage)] томов, которые стоит показывать (решает платформа)."""
+    out = []
     seen: set[str] = set()
-    # только реальные блочные устройства, без tmpfs и прочих псевдо-ФС
-    mounts = [p for p in psutil.disk_partitions(all=False)
-              if p.device.startswith("/dev/")]
-    for part in mounts:
-        mp = part.mountpoint
-        if part.device in seen:
+    for part in psutil.disk_partitions(all=False):
+        name = OS.disk_name(part)
+        if name is None or part.device in seen:
             continue
         try:
-            u = psutil.disk_usage(mp)
+            u = psutil.disk_usage(part.mountpoint)
         except OSError:
             continue
         if u.total < (1 << 30):
             continue
         seen.add(part.device)
-        name = "система" if mp == "/" else Path(mp).name
+        out.append((name, u))
+    return out
+
+
+def render_disk(width: int) -> Group:
+    rows = []
+    for name, u in disk_volumes():
         rows.append(kv(name[:10], bar(u.percent, barw(width)),
                        f"{hbytes(u.used)} / {hbytes(u.total)}   "
                        f"свободно {hbytes(u.free)}"))
     return Group(*rows) if rows else Group(Text("  нет данных", style=DIM))
-
-
-def battery_extra() -> str:
-    """Циклы и здоровье батареи из /sys/class/power_supply (если ядро отдаёт)."""
-    base = Path("/sys/class/power_supply")
-    bats = sorted(base.glob("BAT*")) if base.is_dir() else []
-    if not bats:
-        return ""
-    b = bats[0]
-
-    def num(fn: str) -> int:
-        try:
-            return int((b / fn).read_text().strip())
-        except (OSError, ValueError):
-            return 0
-    parts = []
-    cyc = num("cycle_count")
-    if cyc:
-        parts.append(f"циклов {cyc}")
-    full, design = (num("energy_full") or num("charge_full"),
-                    num("energy_full_design") or num("charge_full_design"))
-    if full and design:
-        parts.append(f"здоровье {full * 100 / design:.0f}%")
-    return ("   " + "   ".join(parts)) if parts else ""
-
-
-def wifi_ssid(iface: str) -> str:
-    """Имя Wi-Fi сети, если интерфейс беспроводной."""
-    if not iface or not Path(f"/sys/class/net/{iface}/wireless").exists():
-        return ""
-    for ln in sh(["nmcli", "-t", "-f", "active,ssid", "dev", "wifi"]).splitlines():
-        if ln.startswith("yes:"):
-            return ln.split(":", 1)[1]
-    return ""
 
 
 def render_battery(width: int) -> Group | None:
@@ -1396,7 +1332,7 @@ def render_battery(width: int) -> Group | None:
     rem = ""
     if b.secsleft and b.secsleft > 0 and b.secsleft != psutil.POWER_TIME_UNLIMITED:
         rem = f"   осталось {b.secsleft // 3600}:{(b.secsleft % 3600) // 60:02d}"
-    note = state + battery_extra()
+    note = "   ".join([state] + [f"{k} {v}" for k, v in battery_facts()])
     return Group(
         kv("Заряд", bar(b.percent, barw(width),
                         color=GREEN if b.percent > 40 else (YELLOW if b.percent > 15 else RED)),
@@ -1475,46 +1411,6 @@ def render_network(width: int = 118) -> Group:
 
 
 # ═══════════════════════ потребление энергии ═══════════════════════════════
-POWERCAP = Path("/sys/class/powercap")
-HWMON = Path("/sys/class/hwmon")
-# как называть источники по-человечески
-POWER_NAMES = {"package-0": "CPU", "package-1": "CPU 2",
-               "core": "└ ядра", "uncore": "└ графика", "dram": "└ память"}
-
-
-def hwmon_power() -> list[tuple[str, float]]:
-    """[(имя, ватты)] из hwmon: встроенная графика, датчики платы."""
-    out = []
-    if not HWMON.is_dir():
-        return out
-    for h in sorted(HWMON.glob("hwmon*")):
-        try:
-            chip = (h / "name").read_text().strip()
-        except OSError:
-            continue
-        for f in sorted(h.glob("power*_input")):
-            try:
-                uw = int(f.read_text().strip())
-            except (OSError, ValueError):
-                continue
-            label = ""
-            lf = f.with_name(f.name.replace("_input", "_label"))
-            try:
-                label = lf.read_text().strip()
-            except OSError:
-                pass
-            name = "iGPU" if chip == "amdgpu" else chip
-            if label and chip != "amdgpu":
-                name = f"{chip} {label}"
-            out.append((name, uw / 1e6))
-    return out
-
-
-# как называть датчики температуры по-человечески
-TEMP_CHIPS = {"k10temp": "CPU", "coretemp": "CPU", "zenpower": "CPU",
-              "amdgpu": "iGPU", "nvme": "SSD", "acpitz": "плата"}
-TEMP_LABELS = {"Tctl": "", "Tdie": "", "Package id 0": "", "edge": "",
-               "Composite": "", "PHY Temperature": "PHY", "MAC Temperature": "MAC"}
 
 
 def temp_color(t: float, crit: float | None) -> str:
@@ -1528,26 +1424,10 @@ def temp_color(t: float, crit: float | None) -> str:
 def temperatures(cards: list[dict] | None = None) -> list[tuple[str, float, float | None]]:
     """[(узел, °C, критическая °C)] по всем датчикам машины.
 
-    Основа — hwmon через psutil (CPU, встроенная графика, сетевой чип), плюс
-    температуры дискретных видеокарт из nvidia-smi."""
+    Датчики машины отдаёт платформенный слой (hwmon на Linux, батарея на
+    macOS), плюс температуры дискретных видеокарт из nvidia-smi."""
     out: list[tuple[str, float, float | None]] = []
-    try:
-        sensors = psutil.sensors_temperatures()
-    except (AttributeError, OSError):
-        sensors = {}
-    cpu, other = [], []
-    for chip, entries in sensors.items():
-        base = TEMP_CHIPS.get(chip)
-        if base is None:                       # сетевые чипы и прочее — по имени
-            base = "сеть" if chip.startswith(("en", "eth", "wl")) else clip(chip, 9)
-        for e in entries:
-            label = TEMP_LABELS.get(e.label or "", e.label or "")
-            if label.startswith("Tccd"):       # кристаллы (чиплеты) Ryzen
-                name = f"└ чип {label[4:]}"
-            else:
-                name = f"{base} {label}".strip()
-            row = (name, e.current, e.critical or e.high)
-            (cpu if base == "CPU" else other).append(row)
+    cpu, other = OS.temperatures()
     out.extend(cpu)
     for c in (cards if cards is not None else gpus()):
         out.append((f"GPU {c['idx']}", c["temp"], 90.0))
@@ -1569,87 +1449,23 @@ def render_temps(width: int, cards: list[dict] | None = None) -> Group | None:
     t.append(f"{'ГОРЯЧЕЕ':<10}", style=f"bold {DIM}")
     t.append(f"{hottest[0]} {hottest[1]:.0f} °C",
              style=temp_color(hottest[1], hottest[2]))
-    t.append("   шкала 0-100 °C; дисков без smartctl не видно", style=DIM)
+    t.append(f"   шкала 0-100 °C; {OS.TEMP_NOTE}", style=DIM)
     rows.append(t)
     return Group(*rows)
 
 
-class PowerMeter:
-    """Живой замер мощности по компонентам.
-
-    CPU считается по счётчикам энергии RAPL (`/sys/class/powercap`): ватты — это
-    прирост джоулей за время между замерами. Ядро отдаёт эти файлы только root,
-    поэтому при отказе в доступе CPU честно помечается как «нет доступа»."""
-
-    def __init__(self) -> None:
-        self.prev: dict[str, tuple[int, float]] = {}
-        self.watts: dict[str, float] = {}
-        self.denied = False
-        self.sample()
-
-    def _domains(self) -> list[tuple[str, Path]]:
-        out = []
-        if not POWERCAP.is_dir():
-            return out
-        for d in sorted(POWERCAP.glob("intel-rapl:*")):
-            try:
-                out.append(((d / "name").read_text().strip(), d))
-            except OSError:
-                continue
-        return out
-
-    def sample(self) -> None:
-        """Снять счётчики; ватты появятся со второго вызова."""
-        now = time.time()
-        seen = False
-        for name, d in self._domains():
-            try:
-                uj = int((d / "energy_uj").read_text())
-            except PermissionError:
-                self.denied = True
-                continue
-            except (OSError, ValueError):
-                continue
-            seen = True
-            prev = self.prev.get(name)
-            if prev:
-                duj, dt = uj - prev[0], now - prev[1]
-                if duj < 0:      # счётчик переполнился
-                    try:
-                        duj += int((d / "max_energy_range_uj").read_text())
-                    except (OSError, ValueError):
-                        duj = 0
-                if dt > 0.05 and duj >= 0:
-                    self.watts[name] = duj / 1e6 / dt
-            self.prev[name] = (uj, now)
-        if seen:
-            self.denied = False
-
-    def cpu_rows(self) -> list[tuple[str, float, bool]]:
-        """[(подпись, ватты, считать ли в сумму)]: пакет целиком, затем его части."""
-        rows = []
-        for name in sorted(self.watts, key=lambda n: (not n.startswith("package"), n)):
-            pkg = name.startswith("package")
-            rows.append((POWER_NAMES.get(name, name), self.watts[name], pkg))
-        return rows
-
-    def cpu_total(self) -> float:
-        """Мощность CPU: только пакеты, чтобы не считать ядра дважды."""
-        return sum(w for n, w in self.watts.items() if n.startswith("package"))
-
-
-def power_breakdown(meter: PowerMeter, cards: list[dict] | None = None) -> dict:
+def power_breakdown(meter, cards: list[dict] | None = None) -> dict:
     """Разбивка потребления: [(подпись, ватты)], сумма и что осталось неизмеренным."""
     rows: list[tuple[str, float, bool]] = list(meter.cpu_rows())
     for c in (cards if cards is not None else gpus()):
         rows.append((f"GPU {c['idx']}", c["power"], True))
-    for name, w in hwmon_power():
-        rows.append((name, w, True))
+    rows.extend(OS.extra_power())
+    note = OS.POWER_NOTE_DENIED if meter.denied else OS.POWER_NOTE
     return {"rows": rows, "total": sum(w for _, w, count in rows if count),
-            "denied": meter.denied}
+            "denied": meter.denied, "denied_note": meter.denied_note, "note": note}
 
 
-def render_power(width: int, meter: PowerMeter, cards: list[dict] | None = None) -> Group:
+def render_power(width: int, meter, cards: list[dict] | None = None) -> Group:
     """Секция «энергия»: сколько ватт ест каждый узел прямо сейчас."""
     b = power_breakdown(meter, cards)
     rows: list = []
@@ -1659,13 +1475,11 @@ def render_power(width: int, meter: PowerMeter, cards: list[dict] | None = None)
         rows.append(kv(name, bar(w * 100 / peak, barw(width), lo=101, hi=102,
                                  color=CYAN), val))
     if b["denied"]:
-        rows.append(Text("           CPU: нет доступа к счётчикам RAPL "
-                         "(файлы energy_uj читает только root)", style=YELLOW))
+        rows.append(Text("           " + b["denied_note"][0], style=YELLOW))
     t = Text(" ")
     t.append(f"{'ИТОГО':<10}", style=f"bold {DIM}")
     t.append(f"{b['total']:.1f} Вт", style=f"bold {FG}")
-    measured = "видеокарты" if b["denied"] else "CPU и видеокарты"
-    t.append(f"   измерены {measured}; диски, память, плата и БП — нет", style=DIM)
+    t.append(f"   {b['note'][0]}", style=DIM)
     rows.append(t)
     return Group(*rows)
 
@@ -1771,33 +1585,26 @@ def render_gpu(width: int, cards: list[dict] | None = None) -> Group | None:
     return Group(*rows)
 
 
-def container_cli() -> str:
-    """Имя доступного движка контейнеров: podman, docker или ''."""
-    for cli in ("podman", "docker"):
-        if any(Path(p, cli).exists() for p in os.environ.get("PATH", "").split(":")):
-            return cli
-    return ""
-
-
-def render_containers() -> Group | None:
-    cli = container_cli()
-    if not cli:
+def render_containers(info: dict | None) -> Group | None:
+    """Секция «контейнеры» по данным containers() платформенного слоя."""
+    if not info:
         return None
-    out = sh([cli, "ps", "--format", "{{.Names}}\t{{.Status}}\t{{.Image}}"], timeout=5)
-    rows = [Text(" ").append(f"{cli:<10}", style=DIM)
-            .append(f"{len(out.splitlines())} контейнер(ов)" if out else "нет запущенных",
-                    style=GREEN if out else DIM)]
-    if out:
+    rows_data = info["rows"]
+    if info["state"]:
+        status, style = info["state"], YELLOW
+    else:
+        status = f"{len(rows_data)} контейнер(ов)" if rows_data else "нет запущенных"
+        style = GREEN if rows_data else DIM
+    rows = [Text(" ").append(f"{info['engine']:<10}", style=DIM).append(status, style=style)]
+    if rows_data:
         tbl = Table(box=box.SIMPLE, border_style=DIM, header_style=f"bold {DIM}",
                     pad_edge=False, padding=(0, 1))
         tbl.add_column("КОНТЕЙНЕР", style=CYAN, no_wrap=True)
         tbl.add_column("СТАТУС", no_wrap=True)
         tbl.add_column("ОБРАЗ", style=DIM, no_wrap=True)
-        for ln in out.splitlines()[:15]:
-            parts = ln.split("\t")
-            if len(parts) == 3:
-                up = parts[1].startswith("Up")
-                tbl.add_row(parts[0], Text(parts[1], style=GREEN if up else YELLOW), parts[2])
+        for parts in rows_data[:15]:
+            up = parts[1].startswith("Up")
+            tbl.add_row(parts[0], Text(parts[1], style=GREEN if up else YELLOW), parts[2])
         rows.append(tbl)
     return Group(*rows)
 
@@ -1842,7 +1649,7 @@ def build(console: Console):
                          f"активно: {len(agents)}" if agents else "не запущены")))
     out.append(("body", render_agents(agents, today, w) if agents
                 else Text("  запущенных сессий Claude Code нет", style=DIM)))
-    cpu_note = f"{psutil.cpu_count(logical=False) or '?'} ядер / {psutil.cpu_count()} потоков"
+    cpu_note = cpu_summary()
     out.append(("rule", ("🧠", "ПРОЦЕССОР", cpu_note)))
     out.append(("body", render_cpu(percpu, w)))
     out.append(("rule", ("💾", "ПАМЯТЬ", hbytes(psutil.virtual_memory().total))))
@@ -1868,9 +1675,10 @@ def build(console: Console):
         out.append(("body", temps))
     out.append(("rule", ("🌐", "СЕТЬ", "")))
     out.append(("body", render_network(w)))
-    cont = render_containers()
+    info = containers()
+    cont = render_containers(info)
     if cont:
-        out.append(("rule", ("📦", "КОНТЕЙНЕРЫ", container_cli())))
+        out.append(("rule", ("📦", "КОНТЕЙНЕРЫ", info["engine"])))
         out.append(("body", cont))
     return out
 
@@ -1931,15 +1739,3 @@ def scan_days(days: int = 7) -> list[tuple[str, dict]]:
     return [(d, acc[d]) for d in wanted]
 
 
-def net_counters() -> dict[str, tuple[int, int]]:
-    """{iface: (rx_bytes, tx_bytes)} — счётчики интерфейсов с момента загрузки."""
-    return {n: (c.bytes_recv, c.bytes_sent)
-            for n, c in psutil.net_io_counters(pernic=True).items()}
-
-
-def default_iface() -> tuple[str, str]:
-    """(интерфейс, шлюз) маршрута по умолчанию — из `ip route`."""
-    rt = sh(["ip", "-4", "route", "show", "default"])
-    m = re.search(r"\bdev\s+(\S+)", rt)
-    g = re.search(r"\bvia\s+(\S+)", rt)
-    return (m.group(1) if m else ""), (g.group(1) if g else "")
