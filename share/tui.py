@@ -93,11 +93,128 @@ def act_style(seconds: float) -> str:
     return GREEN if seconds < 60 else (FG if seconds < 600 else DIM)
 
 
+# ── графики и числа для вкладки «Батарея» ──
+def spark_range(values, width: int, lo: float, hi: float, color: str) -> Text:
+    """Спарклайн в окне [lo, hi]: напряжения меняются на доли вольта, от нуля их не видно."""
+    vals = list(values)[-width:]
+    if not vals:
+        return Text("─" * width, style=DIM)
+    span = (hi - lo) or 1.0
+    t = Text("·" * (width - len(vals)), style=DIM)
+    for v in vals:
+        frac = min(1.0, max(0.0, (v - lo) / span))
+        t.append(BLOCKS[min(7, int(frac * 7.999))], style=color)
+    return t
+
+
+def spark_signed(values, width: int, scale: float | None = None,
+                 pos: str = GREEN, neg: str = YELLOW) -> Text:
+    """Спарклайн по модулю, цвет по знаку: заряд (+) и разряд (−) видно сразу."""
+    vals = list(values)[-width:]
+    if not vals:
+        return Text("─" * width, style=DIM)
+    hi = scale or max(abs(v) for v in vals) or 1.0
+    t = Text("·" * (width - len(vals)), style=DIM)
+    for v in vals:
+        frac = min(1.0, abs(v) / hi)
+        ch = BLOCKS[min(7, int(frac * 7.999))] if abs(v) > 1e-6 else "▁"
+        t.append(ch, style=(pos if v > 1e-6 else neg if v < -1e-6 else DIM))
+    return t
+
+
+def chart(values, width: int, height: int, color: str, scale: float | None = None) -> list[Text]:
+    """Многострочный столбчатый график (сверху вниз), высота — height строк."""
+    vals = list(values)[-width:]
+    hi = scale or (max(vals) if vals else 0) or 1.0
+    pad = width - len(vals)
+    rows = []
+    for level in range(height, 0, -1):
+        t = Text("·" * pad if level == 1 else " " * pad, style=DIM)
+        for v in vals:
+            fill = min(1.0, max(0.0, v / hi)) * height - (level - 1)
+            if fill >= 1:
+                t.append("█", style=color)
+            elif fill > 0:
+                t.append(BLOCKS[min(7, int(fill * 8))], style=color)
+            else:
+                t.append(" " if level > 1 else "▁", style=DIM if level == 1 else color)
+        rows.append(t)
+    return rows
+
+
+# крупные цифры 3×5 точек: две строки точек складываются в один символ полублоков
+BIG_FONT = {
+    "0": ("###", "#.#", "#.#", "#.#", "###"), "1": (".#.", "##.", ".#.", ".#.", "###"),
+    "2": ("###", "..#", "###", "#..", "###"), "3": ("###", "..#", "###", "..#", "###"),
+    "4": ("#.#", "#.#", "###", "..#", "..#"), "5": ("###", "#..", "###", "..#", "###"),
+    "6": ("###", "#..", "###", "#.#", "###"), "7": ("###", "..#", "..#", "..#", "..#"),
+    "8": ("###", "#.#", "###", "#.#", "###"), "9": ("###", "#.#", "###", "..#", "###"),
+    "%": ("#.#", "..#", ".#.", "#..", "#.#"), "?": ("###", "..#", ".##", "...", ".#."),
+}
+
+
+def big_text(s: str, style: str) -> list[Text]:
+    """Три строки крупного текста из BIG_FONT (неизвестные символы — «?»)."""
+    half = {(1, 1): "█", (1, 0): "▀", (0, 1): "▄", (0, 0): " "}
+    lines = [Text(), Text(), Text()]
+    for ch in s:
+        g = BIG_FONT.get(ch, BIG_FONT["?"]) + ("...",)
+        for r in range(3):
+            top, bot = g[2 * r], g[2 * r + 1]
+            lines[r].append("".join(half[(top[i] == "#", bot[i] == "#")] for i in range(3)) + " ",
+                            style=style)
+    return lines
+
+
+def watts(v: float | None, signed: bool = False) -> str:
+    """«5.78 Вт», со знаком «+24.1 Вт» / «−5.8 Вт» (настоящий минус)."""
+    if v is None:
+        return "—"
+    s = f"{abs(v):.2f}" if abs(v) < 10 else f"{abs(v):.1f}"
+    sign = ("+" if v > 0.005 else "−" if v < -0.005 else "") if signed else ("−" if v < -0.005 else "")
+    return f"{sign}{s} Вт"
+
+
+def amps(v: float | None) -> str:
+    if v is None:
+        return "—"
+    return f"{'−' if v < -0.0005 else '+' if v > 0.0005 else ''}{abs(v):.3f} А"
+
+
+def hmin(m: int | None) -> str:
+    return f"{m // 60}ч {m % 60:02d}м" if m is not None else "—"
+
+
+def bat_now(d: dict) -> dict:
+    """Живые цифры батареи: посекундные из SMC, если есть, иначе из контроллера.
+
+    {volt, amp, pw (+ в батарею), sys, in, live — пришли ли из SMC}."""
+    lv = d.get("live") or {}
+    fl = d.get("flow") or {}
+    volt = lv.get("volt") or d.get("voltage")
+    amp = lv.get("amp") if lv.get("amp") is not None else d.get("current")
+    if lv.get("amp") is not None and volt:
+        pw = volt * lv["amp"]
+    else:
+        pw = fl.get("batt") if fl.get("batt") is not None else d.get("power")
+    load = lv.get("sys") if lv.get("sys") is not None else fl.get("load")
+    if load is None and pw is not None and pw < 0 and d.get("source") == "battery":
+        load = -pw                                 # без телеметрии: система живёт от батареи
+    p_in = lv.get("in") if lv.get("in") is not None else fl.get("in")
+    return {"volt": volt, "amp": amp, "pw": pw, "sys": load, "in": p_in,
+            "live": bool(lv.get("amp") is not None or lv.get("sys") is not None)}
+
+
+BATT_STATUS = {"charging": ("заряжается", GREEN), "discharging": ("разряжается", YELLOW),
+               "full": ("заряжена полностью", CYAN), "idle": ("на блоке, не заряжается", BLUE)}
+
+
 # ═══════════════════════════════ сбор данных ═══════════════════════════════
 class Sampler:
     """Все замеры в одном месте; тяжёлое считается реже лёгкого."""
 
     HIST = 200
+    BHIST = 900                 # история батареи: 15 минут при опросе раз в секунду
 
     def __init__(self) -> None:
         self.hist = {k: deque(maxlen=self.HIST) for k in
@@ -160,6 +277,12 @@ class Sampler:
         self.dns: list[str] = []
         self.desktop = False
         self.ticks = 0
+        # вкладка «Батарея»: подробный замер раз в секунду в отдельном потоке
+        self.bd: dict | None = None
+        self.bd_scanned = False
+        self.bd_busy = False
+        self.bhist = {k: deque(maxlen=self.BHIST) for k in ("load", "in", "batt", "amp", "volt")}
+        self.cell_hist: list[deque] = []
 
     # ── лёгкий тик, вызывается каждую секунду ──
     def tick(self) -> None:
@@ -355,6 +478,34 @@ class Sampler:
             mem = c["used"] * 100 / c["total"] if c["total"] else 0.0
             self.gpu_mem_hist.setdefault(i, deque(maxlen=self.HIST)).append(mem)
 
+    def scan_battery(self) -> None:
+        """Подробная батарея (ioreg / sysfs) и её история; повторный вход пропускается."""
+        if self.bd_busy:
+            return
+        self.bd_busy = True
+        try:
+            try:
+                d = core.battery_detail()
+            except Exception:
+                d = None
+            self.bd, self.bd_scanned = d, True
+            if not d:
+                return
+            n = bat_now(d)
+            self.bhist["load"].append(n["sys"] or 0.0)
+            self.bhist["in"].append(n["in"] or 0.0)
+            self.bhist["batt"].append(n["pw"] or 0.0)
+            self.bhist["amp"].append(n["amp"] or 0.0)
+            if n["volt"]:
+                self.bhist["volt"].append(n["volt"])
+            cells = d.get("cells") or []
+            if len(self.cell_hist) != len(cells):
+                self.cell_hist = [deque(maxlen=self.BHIST) for _ in cells]
+            for h, v in zip(self.cell_hist, cells):
+                h.append(v)
+        finally:
+            self.bd_busy = False
+
     def scan_net_extra(self) -> None:
         self.ports = core.listening_ports()
         self.tcp = core.tcp_summary()
@@ -382,6 +533,9 @@ class MxStat(App):
     #c-net  { width: 1fr; }
     #c-dsk  { width: 1fr; }
     #c-temp { width: 1fr; }
+    .bcard  { width: 1fr; }
+    /* узкий терминал: карточки батареи друг под другом, а не в ряд */
+    #bat-scroll.narrow .row { layout: vertical; }
     #t-agents, #t-agents2, #t-procs, #t-net, #t-ports { height: auto; max-height: 100%; }
     DataTable { background: #16161e; }
     DataTable > .datatable--header { background: #1f2335; color: #565f89; text-style: bold; }
@@ -397,6 +551,7 @@ class MxStat(App):
         Binding("4", "tab('system')", "Система"),
         Binding("5", "tab('net')", "Сеть"),
         Binding("6", "tab('gpu')", "Видео"),
+        Binding("7", "tab('batt')", "Батарея"),
         Binding("p", "pause", "Пауза"),
         Binding("s", "sort", "Сортировка"),
         Binding("f", "filter", "Фильтр claude"),
@@ -459,6 +614,16 @@ class MxStat(App):
                 with VerticalScroll():
                     yield Static(id="c-gpumain", classes="card")
                     yield DataTable(id="t-gpuproc", classes="card")
+            with TabPane("Батарея", id="batt"):
+                with VerticalScroll(id="bat-scroll"):
+                    with Horizontal(classes="row"):
+                        yield Static(id="c-bat-now", classes="card bcard")
+                        yield Static(id="c-bat-flow", classes="card bcard")
+                    with Horizontal(classes="row"):
+                        yield Static(id="c-bat-cells", classes="card bcard")
+                        yield Static(id="c-bat-adapter", classes="card bcard")
+                    yield Static(id="c-bat-graph", classes="card")
+                    yield Static(id="c-bat-health", classes="card")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -473,6 +638,9 @@ class MxStat(App):
             "t-net": "🔌 ИНТЕРФЕЙСЫ", "t-ports": "🚪 ОТКРЫТЫЕ ПОРТЫ",
             "c-gpu": "🎮 ВИДЕОКАРТЫ", "c-gpumain": "🎮 ВИДЕОКАРТЫ",
             "t-gpuproc": "🧩 ПРОЦЕССЫ НА GPU",
+            "c-bat-now": "🔋 БАТАРЕЯ", "c-bat-flow": "⚡ ПОТОК МОЩНОСТИ",
+            "c-bat-cells": "🧪 НАПРЯЖЕНИЕ И БАНКИ", "c-bat-adapter": "🔌 БЛОК ПИТАНИЯ",
+            "c-bat-graph": "📈 ГРАФИКИ", "c-bat-health": "❤ ЗДОРОВЬЕ",
         }
         for wid, title in titles.items():
             try:
@@ -500,12 +668,15 @@ class MxStat(App):
         self.run_worker(self.s.scan_containers, thread=True, exclusive=False)
         self.run_worker(self.s.scan_net_extra, thread=True, exclusive=False)
         self.run_worker(self.s.scan_gpu, thread=True, exclusive=False)
+        self.run_worker(self.s.scan_battery, thread=True, exclusive=False)
+        self._fit_battery_layout()
         self._timer = self.set_interval(self.interval, self.refresh_all)
         self.set_interval(2.0, lambda: self.run_worker(self.s.scan_gpu, thread=True))
         self.set_interval(20.0, lambda: self.run_worker(self.s.scan_slow, thread=True))
         self.set_interval(3.0, lambda: self.run_worker(self.s.scan_sessions, thread=True))
         self.set_interval(10.0, lambda: self.run_worker(self.s.scan_net_extra, thread=True))
         self.set_interval(30.0, lambda: self.run_worker(self.s.scan_containers, thread=True))
+        self.set_interval(1.0, self._battery_tick)
         self.refresh_all()
         self.run_worker(self.s.scan_sessions, thread=True, exclusive=False)
 
@@ -522,7 +693,20 @@ class MxStat(App):
             t.add_columns(*(h for _, h in cols))
             self._agent_keys[tid] = keys
 
+    def _battery_tick(self) -> None:
+        """Замер батареи раз в секунду (на паузе история не пишется)."""
+        if not self.paused:
+            self.run_worker(self.s.scan_battery, thread=True, exclusive=False)
+
+    def _fit_battery_layout(self) -> None:
+        """Уже 110 колонок карточки батареи встают в столбик."""
+        self.query_one("#bat-scroll").set_class((self.size.width or 120) < 110, "narrow")
+
     def on_resize(self, _event) -> None:
+        try:
+            self._fit_battery_layout()
+        except Exception:
+            pass
         try:
             self._fit_agent_columns()
             self._draw_agents()
@@ -548,6 +732,7 @@ class MxStat(App):
         self.run_worker(self.s.scan_net_extra, thread=True)
         self.run_worker(self.s.scan_containers, thread=True)
         self.run_worker(self.s.scan_gpu, thread=True)
+        self.run_worker(self.s.scan_battery, thread=True)
 
     def action_faster(self) -> None:
         self.interval = max(0.5, self.interval - 0.5)
@@ -585,6 +770,11 @@ class MxStat(App):
         self._draw_system()
         self._draw_net_tab()
         self._draw_gpu()
+        try:
+            self._draw_battery()
+        except Exception as e:             # набор ключей у чужих машин бывает неожиданным
+            self.query_one("#c-bat-now", Static).update(
+                Text(f"батарея: не удалось отрисовать ({type(e).__name__}: {e})", style=RED))
 
     def _card_width(self, wid: str, fallback: int) -> int:
         """Ширина контента карточки: Widget.size уже без рамки и отступов."""
@@ -1523,6 +1713,364 @@ class MxStat(App):
                        Text(label + ("" if local else "  ·  снаружи"),
                             style=YELLOW if exposed else (FG if hint else DIM)))
         pt.border_subtitle = f"{len(s.ports)} слушающих сокетов · {core.OS.PORTS_SOURCE}"
+
+    # ── вкладка «Батарея» ──
+    def _draw_battery(self) -> None:
+        """Шесть карточек вкладки 7; ряды попарно выравниваются по высоте."""
+        s = self.s
+        d = s.bd
+        ids = ("c-bat-now", "c-bat-flow", "c-bat-cells", "c-bat-adapter",
+               "c-bat-graph", "c-bat-health")
+        if not d:
+            msg = ("опрашиваю…" if not s.bd_scanned else
+                   "батареи нет — машина без батареи или система её не отдаёт")
+            self.query_one("#c-bat-now", Static).update(Text(msg, style=DIM))
+            for wid in ids[1:]:
+                self.query_one(f"#{wid}").display = False
+            return
+        for wid in ids[1:]:
+            self.query_one(f"#{wid}").display = True
+        narrow = self.query_one("#bat-scroll").has_class("narrow")
+        full = self._card_width("c-bat-graph", 120)
+        half = full if narrow else max(30, (full - 3) // 2)
+        for pair in ((("c-bat-now", self._bat_now_rows), ("c-bat-flow", self._bat_flow_rows)),
+                     (("c-bat-cells", self._bat_cell_rows), ("c-bat-adapter", self._bat_adapter_rows))):
+            built = []
+            for wid, builder in pair:
+                w = self._card_width(wid, half)
+                built.append((wid, w, builder(d, w)))
+            height = 0 if narrow else max(len(r) for _, _, r in built)
+            for wid, w, rows in built:
+                rows += [Text("")] * (height - len(rows))
+                self.query_one(f"#{wid}", Static).update(joined(rows, w))
+        self.query_one("#c-bat-graph", Static).update(joined(self._bat_graph_rows(d, full), full))
+        self.query_one("#c-bat-health", Static).update(
+            joined(self._bat_health_rows(d, self._card_width("c-bat-health", full)),
+                   self._card_width("c-bat-health", full)))
+        upd = d.get("updated")
+        fresh = (f" · контроллер обновил {ago(time.time() - upd)} назад"
+                 if upd and 0 <= time.time() - upd < 86400 else "")
+        self.query_one("#c-bat-now").border_subtitle = f"{d.get('src_note', '')} · опрос 1 с{fresh}"
+        src = "SMC раз в 1 с, банки — контроллер раз в ~60 с" if bat_now(d)["live"] else "опрос раз в 1 с"
+        self.query_one("#c-bat-graph").border_subtitle = (
+            f"зелёный — заряд, жёлтый — разряд · {src} · на экране {self._bat_span(full)}"
+            f" из {dur(len(s.bhist['amp']))}")
+
+    def _bat_span(self, w: int) -> str:
+        return dur(max(8, w - 23))
+
+    def _bat_now_rows(self, d: dict, w: int) -> list[Text]:
+        on_adapter = d["source"] == "adapter"
+        n = bat_now(d)
+        pct = d.get("percent")
+        colr = (GREEN if (pct or 0) > 40 else YELLOW if (pct or 0) > 15 else RED)
+        big = big_text(f"{pct}%" if pct is not None else "?", f"bold {colr}")
+        label, st_color = BATT_STATUS.get(d["status"], (d["status"], FG))
+        info = [Text("🔌 ОТ БЛОКА ПИТАНИЯ" if on_adapter else "🔋 ОТ БАТАРЕИ",
+                     style=f"bold {GREEN if on_adapter else YELLOW}"),
+                Text(label, style=f"bold {st_color}")]
+        if d.get("time_full") is not None:
+            info.append(line("до полного ", Text(hmin(d["time_full"]), style=f"bold {FG}"), lw=11))
+        elif d.get("time_empty") is not None:
+            info.append(line("до разряда ", Text(hmin(d["time_empty"]), style=f"bold {FG}"), lw=11))
+        else:
+            info.append(Text("время: —", style=DIM))
+        rows = []
+        for b, i in zip(big, info):
+            t = Text("  ")
+            t.append_text(b)
+            t.append("   ")
+            t.append_text(i)
+            rows.append(t)
+        rows.append(Text(""))
+        if pct is not None:
+            rows.append(line("заряд", core.bar(pct, max(8, min(40, w - 18)), color=colr),
+                             f"{pct}%", lw=12))
+        # живые цифры — SMC раз в секунду; рядом то, что контроллер усреднил за минуту
+        ctl = n["live"] and w >= 56
+        cur = n["amp"]
+        rows.append(line("напряжение", Text(f"{n['volt']:.3f} В" if n["volt"] else "—",
+                                            style=f"bold {FG}"),
+                         f"контроллер {d['voltage']:.3f} В" if ctl and d.get("voltage") else "",
+                         lw=12))
+        rows.append(line("ток", Text(amps(cur), style=f"bold {GREEN if (cur or 0) > 0 else YELLOW if (cur or 0) < 0 else FG}"),
+                         ("заряд" if (cur or 0) > 0.0005 else "разряд" if (cur or 0) < -0.0005 else "")
+                         + (f"  ·  контроллер {amps(d.get('current'))}" if ctl else ""), lw=12))
+        rows.append(line("мощность", Text(watts(n["pw"], signed=True), style=FG),
+                         "в батарею" if (n["pw"] or 0) > 0.005 else
+                         "из батареи" if (n["pw"] or 0) < -0.005 else "", lw=12))
+        if d.get("cap_now") and d.get("cap_full"):
+            rows.append(line("ёмкость", f"{d['cap_now']} / {d['cap_full']} {d['unit']}", lw=12))
+        if d.get("temp") is not None:
+            rows.append(line("температура", Text(f"{d['temp']:.1f} °C",
+                                                 style=core.temp_color(d["temp"], 45.0)), lw=12))
+        rows.append(Text("ток и мощность живьём из SMC, раз в секунду" if n["live"] else
+                         "цифры контроллера батареи", style=DIM))
+        return rows
+
+    def _bat_flow_rows(self, d: dict, w: int) -> list[Text]:
+        """Схема «блок → система / батарея» и ватты по каждой ветке."""
+        fl = d.get("flow") or {}
+        n = bat_now(d)
+        p_in, load, p_bat = n["in"], n["sys"], n["pw"]
+        on_adapter = d["source"] == "adapter"
+        charging = p_bat is not None and p_bat > 0.05
+        draining = p_bat is not None and p_bat < -0.05
+        rows: list[Text] = []
+
+        def node(name: str, val: str, style: str) -> Text:
+            t = Text(name, style=f"bold {style}")
+            if val != "—":
+                t.append(f" {val}", style=FG)
+            return t
+
+        def arrow(src: Text, dst: Text, style: str) -> Text:
+            t = Text()
+            t.append_text(src)
+            t.append(" ━━━▶ ", style=style)
+            t.append_text(dst)
+            return t
+        sysn = node("СИСТЕМА", watts(load), WHITE)
+        if on_adapter:
+            rows.append(arrow(node("БЛОК", watts(p_in), GREEN), sysn, GREEN))
+            if charging:
+                t = Text(" " * 6)
+                t.append("┗━━━━━▶ ", style=GREEN)
+                t.append_text(node("БАТАРЕЯ", watts(p_bat, signed=True), CYAN))
+                rows.append(t)
+            elif draining:
+                rows.append(arrow(node("БАТАРЕЯ", watts(-p_bat), YELLOW),
+                                  Text("помогает блоку", style=YELLOW), YELLOW))
+            else:
+                rows.append(Text("      батарея в покое", style=DIM))
+        else:
+            rows.append(arrow(node("БАТАРЕЯ", watts(-p_bat if p_bat else p_bat), YELLOW), sysn, YELLOW))
+            rows.append(Text("блок питания не подключён", style=DIM))
+        rows.append(Text(""))
+
+        # ── ватты по веткам с полосами в общей шкале ──
+        vals = [v for v in (p_in, load, abs(p_bat) if p_bat is not None else None) if v]
+        peak = max(vals) if vals else 1.0
+        bw = max(6, min(30, w - 34))
+        lw = 15
+
+        def wrow(label: str, v: float | None, style: str, note: str = "", signed: bool = False) -> Text:
+            t = Text(f"{label:<{lw}}", style=DIM)
+            t.append_text(core.bar(abs(v or 0) * 100 / peak, bw, lo=101, hi=102, color=style))
+            t.append_text(self._fit(Text(watts(v, signed), style=f"bold {FG}"), 11, "right"))
+            if note:
+                t.append(f"  {note}", style=DIM)
+            return t
+        vi = ""
+        if fl.get("in_v") and fl.get("in_a"):
+            vi = f"{fl['in_v']:.2f} В × {fl['in_a']:.2f} А"
+        if p_in is not None:
+            rows.append(wrow("от блока", p_in, GREEN, vi))
+        if load is not None:
+            rows.append(wrow("система берёт", load, WHITE))
+        rows.append(wrow("батарея", p_bat, GREEN if charging else YELLOW,
+                         "заряд" if charging else "разряд" if draining else "", signed=True))
+        if fl.get("loss") is not None and on_adapter:
+            eff = ""
+            if fl.get("loss") and fl.get("in"):
+                eff = f"КПД блока ≈{fl['in'] * 100 / (fl['in'] + fl['loss']):.0f}%"
+            rows.append(wrow("потери блока", fl["loss"], RED, eff))
+        if fl.get("wall") and on_adapter:
+            rows.append(line("из розетки ≈", watts(fl["wall"]), lw=lw))
+        if not fl and not n["live"]:
+            rows.append(Text("поток «блок → система» система не отдаёт — видна только батарея",
+                             style=DIM))
+        elif on_adapter and p_in and load is not None and p_bat is not None:
+            rest = p_in - load - p_bat
+            rows.append(line("баланс", f"блок − система − батарея = {watts(rest, True)}",
+                             "потери и погрешность датчиков", lw=lw))
+        elif not on_adapter and load is not None and p_bat is not None and draining:
+            rows.append(line("баланс", f"батарея − система = {watts(-p_bat - load, True)}",
+                             "потери и погрешность датчиков", lw=lw))
+        return rows
+
+    def _bat_cell_rows(self, d: dict, w: int) -> list[Text]:
+        """Напряжение пакета и банок: полоса в окне 3.0–4.35 В, разброс, сопротивление."""
+        rows = []
+        cells, ra, qmax = d.get("cells") or [], d.get("cells_ra") or [], d.get("qmax") or []
+        pack = d.get("voltage")
+        rows.append(line("пакет", Text(f"{pack:.3f} В" if pack else "—", style=f"bold {FG}"),
+                         f"{len(cells)} {'банка' if len(cells) == 1 else 'банки' if len(cells) < 5 else 'банок'}"
+                         f" последовательно, сумма {sum(cells):.3f} В" if cells else "",
+                         lw=10))
+        if not cells:
+            rows.append(Text("напряжения банок контроллер не отдаёт", style=DIM))
+            return rows
+        lo_v, hi_v = min(cells), max(cells)
+        spread = (hi_v - lo_v) * 1000
+        bw = max(6, min(28, w - 40))
+        rows.append(Text(""))
+        for i, v in enumerate(cells):
+            t = Text(f"банка {i + 1}  ", style=DIM)
+            style = (YELLOW if len(cells) > 1 and v == lo_v and spread >= 30 else
+                     CYAN if v == hi_v and len(cells) > 1 else FG)
+            t.append_text(core.bar((v - 3.0) * 100 / 1.35, bw, lo=101, hi=102, color=CYAN))
+            t.append_text(self._fit(Text(f"{v:.3f} В", style=f"bold {style}"), 10, "right"))
+            dv = (v - sum(cells) / len(cells)) * 1000
+            t.append(f"  {'+' if dv >= 0 else '−'}{abs(dv):.0f} мВ", style=DIM)
+            if i < len(ra):
+                t.append(f"  Ra {ra[i]}", style=DIM)
+            if i < len(qmax) and w >= 80:
+                t.append(f"  Qmax {qmax[i]}", style=DIM)
+            rows.append(t)
+        rows.append(Text(""))
+        sc = GREEN if spread < 20 else (YELLOW if spread < 50 else RED)
+        r = Text(f"{'разброс':<10}", style=DIM)
+        r.append(f"{spread:.0f} мВ", style=f"bold {sc}")
+        r.append(f"  мин {lo_v:.3f} · макс {hi_v:.3f} В  ·  "
+                 + ("норма" if spread < 20 else "заметный" if spread < 50 else "дисбаланс"),
+                 style=DIM)
+        rows.append(r)
+        if ra:
+            rows.append(line("Ra", " · ".join(str(x) for x in ra),
+                             "сопротивление банок, ед. контроллера (≈ мОм)", lw=10))
+        return rows
+
+    def _bat_adapter_rows(self, d: dict, w: int) -> list[Text]:
+        ad = d.get("adapter")
+        ch = d.get("charger") or {}
+        rows = []
+        if ad:
+            title = " · ".join(x for x in (ad.get("name"), ad.get("maker")) if x) or "блок питания"
+            rows.append(Text(title, style=f"bold {CYAN}"))
+            rows.append(line("мощность", Text(f"{ad['watts']} Вт", style=f"bold {FG}") if ad.get("watts")
+                             else Text("система не сообщает", style=DIM),
+                             "беспроводной" if ad.get("wireless") else "", lw=12))
+            if ad.get("voltage") or ad.get("current"):
+                rows.append(line("PD сейчас", f"{ad['voltage'] or 0:.1f} В × {ad['current'] or 0:.2f} А",
+                                 lw=12))
+            if ad.get("profiles"):
+                t = Text(f"{'профили PD':<12}", style=DIM)
+                for i, (v, a) in enumerate(ad["profiles"]):
+                    if i:
+                        t.append(" · ", style=DIM)
+                    act = i == ad.get("active")
+                    t.append(f"{v:g}В {a:g}А", style=f"bold {GREEN}" if act else FG)
+                    if act:
+                        t.append("◀", style=GREEN)
+                rows.append(t)
+            if ad.get("family"):
+                rows.append(line("семейство", f"0x{ad['family'] & 0xffffffff:08x}", lw=12))
+        else:
+            rows.append(Text("блок питания не подключён", style=f"bold {DIM}"))
+            rows.append(Text("при подключении здесь будут мощность, напряжение и ток", style=DIM))
+            rows.append(Text("по USB-PD и профили, которые предлагает блок", style=DIM))
+        if ch:
+            rows.append(Text(""))
+            rows.append(Text("ЗАРЯДНОЕ УСТРОЙСТВО MAC", style=f"bold {DIM}"))
+            cv, n = ch.get("voltage"), len(d.get("cells") or [])
+            if cv:
+                note = (f"на банку · пакет {cv * n:.2f} В" if n > 1 and cv < 5 else "")
+                rows.append(line("цель заряда", f"{cv:.3f} В", note, lw=12))
+            if ch.get("current") is not None:
+                rows.append(line("ток заряда", f"{ch['current']:.3f} А", lw=12))
+            reason = ch.get("not_charging")
+            if reason:
+                rows.append(line("не заряжает", f"код 0x{reason:x}",
+                                 "нет блока" if not ad else "", lw=12))
+            if ch.get("slow"):
+                rows.append(line("медленно", f"код 0x{ch['slow']:x}", lw=12))
+        return rows
+
+    def _bat_graph_rows(self, d: dict, w: int) -> list[Text]:
+        """Живые графики: система, блок, батарея, ток, напряжение пакета и банок."""
+        h = self.s.bhist
+        lw = 15
+        gw = max(8, w - lw - 8)
+        rows: list[Text] = []
+
+        def head(label: str, now: str, rng: str) -> Text:
+            t = Text(f"{label:<{lw}}", style=f"bold {DIM}")
+            t.append(now, style=f"bold {FG}")
+            t.append(f"   {rng}", style=DIM)
+            return t
+
+        def mm(vals, fmt) -> str:
+            v = list(vals)[-gw:]
+            return f"мин {fmt(min(v))} · макс {fmt(max(v))}" if v else ""
+
+        load = list(h["load"])
+        if any(load) or bat_now(d)["sys"] is not None:
+            rows.append(head("система берёт", watts(load[-1] if load else None), mm(load, watts)))
+            for r in chart(load, gw, 4 if w >= 100 else 3, WHITE):
+                t = Text(" " * lw)
+                t.append_text(r)
+                rows.append(t)
+        if any(h["in"]) or (d["source"] == "adapter" and bat_now(d)["in"] is not None):
+            pin = list(h["in"])
+            rows.append(head("от блока", watts(pin[-1] if pin else None), mm(pin, watts)))
+            t = Text(" " * lw)
+            t.append_text(spark(pin, width=gw, color=GREEN))
+            rows.append(t)
+        for key, label, fmt in (("batt", "батарея, Вт", lambda v: watts(v, True)),
+                                ("amp", "ток батареи", amps)):
+            vals = list(h[key])
+            rows.append(head(label, fmt(vals[-1]) if vals else "—", mm(vals, fmt)))
+            t = Text(" " * lw)
+            t.append_text(spark_signed(vals, gw))
+            rows.append(t)
+        volt = list(h["volt"])
+        if volt:
+            win = volt[-gw:]
+            lo, hi = min(win), max(win)
+            pad = max(0.01, (hi - lo) * 0.1)
+            rows.append(head("напряжение", f"{volt[-1]:.3f} В",
+                             f"мин {lo:.3f} · макс {hi:.3f} В"))
+            t = Text(" " * lw)
+            t.append_text(spark_range(volt, gw, lo - pad, hi + pad, CYAN))
+            rows.append(t)
+        ch = self.s.cell_hist
+        if ch and any(ch):
+            win = [v for c in ch for v in list(c)[-gw:]]
+            lo, hi = min(win), max(win)
+            pad = max(0.005, (hi - lo) * 0.1)
+            rows.append(head("банки", "", f"общая шкала {lo:.3f}…{hi:.3f} В — видно, какая отстаёт"))
+            colors = (CYAN, PURPLE, BLUE, GREEN, YELLOW, RED)
+            for i, c in enumerate(ch):
+                t = Text(f"  банка {i + 1:<{lw - 8}}", style=DIM)
+                t.append_text(spark_range(c, gw, lo - pad, hi + pad, colors[i % len(colors)]))
+                t.append(f" {c[-1]:.3f}" if c else "", style=FG)
+                rows.append(t)
+        return rows
+
+    def _bat_health_rows(self, d: dict, w: int) -> list[Text]:
+        rows = []
+        lw = 14
+        cyc, cyc_d = d.get("cycles"), d.get("cycles_design")
+        if cyc is not None:
+            if cyc_d:
+                rows.append(line("циклы", core.bar(cyc * 100 / cyc_d, 24, lo=70, hi=90),
+                                 f"{cyc} из {cyc_d} по паспорту ({cyc * 100 / cyc_d:.0f}%)", lw=lw))
+            else:
+                rows.append(line("циклы", str(cyc), lw=lw))
+        full, design, nom = d.get("cap_full"), d.get("cap_design"), d.get("cap_nominal")
+        if full and design:
+            hp = full * 100 / design
+            rows.append(line("ёмкость", core.bar(hp, 24, color=(
+                GREEN if hp >= 80 else YELLOW if hp >= 65 else RED)),
+                f"полная {full} · паспорт {design} {d['unit']}"
+                + (f" · номинал {nom}" if nom else "") + f"  →  здоровье {hp:.0f}%", lw=lw))
+        if d.get("temp") is not None:
+            rows.append(line("температура", f"{d['temp']:.1f} °C", lw=lw))
+        life = d.get("lifetime") or {}
+        if life.get("v_min") or life.get("v_max"):
+            rng = " … ".join(f"{v:.2f}" for v in (life.get("v_min"), life.get("v_max")) if v)
+            rows.append(line("за всю жизнь", f"напряжение {rng} В", lw=lw))
+        if life.get("i_chg_max") or life.get("i_dis_max"):
+            rows.append(line("", f"ток заряда до {life.get('i_chg_max') or 0:.2f} А  ·  "
+                                 f"разряда до {abs(life.get('i_dis_max') or 0):.2f} А", lw=lw))
+        if life.get("t_max") is not None:
+            rows.append(line("", f"температура {life.get('t_min') or 0:.1f} … {life['t_max']:.1f} °C"
+                                 + (f"  ·  в среднем {life['t_avg']:.1f} °C"
+                                    if life.get("t_avg") is not None else ""), lw=lw))
+        if d.get("device"):
+            rows.append(line("контроллер", d["device"], lw=lw))
+        return rows or [Text("контроллер не отдаёт сведений о здоровье", style=DIM)]
 
 
 def main() -> int:

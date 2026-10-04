@@ -51,6 +51,7 @@ dns_servers = OS.dns_servers
 wifi_ssid = OS.wifi_ssid
 tcp_summary = OS.tcp_summary
 battery_facts = OS.battery_facts
+battery_detail = OS.battery_detail
 memory_extra = OS.memory_extra
 cpu_summary = OS.cpu_summary
 containers = OS.containers
@@ -1333,12 +1334,48 @@ def render_battery(width: int) -> Group | None:
     if b.secsleft and b.secsleft > 0 and b.secsleft != psutil.POWER_TIME_UNLIMITED:
         rem = f"   осталось {b.secsleft // 3600}:{(b.secsleft % 3600) // 60:02d}"
     note = "   ".join([state] + [f"{k} {v}" for k, v in battery_facts()])
-    return Group(
+    rows = [
         kv("Заряд", bar(b.percent, barw(width),
                         color=GREEN if b.percent > 40 else (YELLOW if b.percent > 15 else RED)),
            f"{b.percent:.0f}%{rem}"),
         Text("           " + note, style=DIM),
-    )
+    ]
+    live = battery_live_line()
+    if live:
+        rows.append(Text("           " + live, style=DIM))
+    return Group(*rows)
+
+
+def battery_live_line() -> str:
+    """Одна строка для снимка: напряжение, ток, ватты блока и системы, банки."""
+    try:
+        d = battery_detail()
+    except Exception:
+        return ""
+    if not d:
+        return ""
+    lv, fl = d.get("live") or {}, d.get("flow") or {}
+    volt = lv.get("volt") or d.get("voltage")
+    amp = lv.get("amp") if lv.get("amp") is not None else d.get("current")
+    load = lv.get("sys") if lv.get("sys") is not None else fl.get("load")
+    p_in = lv.get("in") if lv.get("in") is not None else fl.get("in")
+    parts = []
+    if volt:
+        parts.append(f"{volt:.2f} В")
+    if amp is not None:
+        parts.append(f"{amp:+.2f} А".replace("-", "−"))
+    if p_in is not None:
+        parts.append(f"от блока {p_in:.1f} Вт")
+    if load is not None:
+        parts.append(f"система {load:.1f} Вт")
+    cells = d.get("cells") or []
+    if cells:
+        spread = (max(cells) - min(cells)) * 1000
+        parts.append("банки " + "/".join(f"{c:.3f}" for c in cells) + f" В (разброс {spread:.0f} мВ)")
+    ad = d.get("adapter")
+    if ad and ad.get("watts"):
+        parts.append(f"блок {ad['watts']} Вт")
+    return "   ".join(parts)
 
 
 def render_network(width: int = 118) -> Group:

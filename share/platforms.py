@@ -11,6 +11,14 @@ platform_macos.py с одинаковым интерфейсом; core и tui р
   memory_extra(mem) -> [(подпись, байт)]
   disk_name(partition) -> имя тома или None (не показывать)
   battery_facts() -> [(подпись, значение)]
+  battery_detail() -> dict | None     — живая батарея для вкладки 7 (None — батареи нет):
+      source 'adapter'|'battery', status 'charging'|'discharging'|'full'|'idle',
+      percent, voltage В, current А (− разряд), power Вт (− разряд),
+      time_empty / time_full мин, cells [В], cells_ra, qmax, unit + cap_now/full/
+      nominal/design, cycles, cycles_design, temp °C, lifetime {}, charger {},
+      updated epoch | None, live {sys, in, volt, amp} | None (посекундно), adapter {watts, voltage, current, name, maker, wireless, profiles, active} | None,
+      flow {in, load, batt, loss, wall, in_v, in_a} Вт/В/А | None, device, src_note;
+      чего платформа не знает — None или пусто
   default_iface, net_counters, dns_servers, wifi_ssid
   listening_sockets() -> [(порт, адрес, pid)], tcp_summary()
   containers() -> {engine, state, rows} | None

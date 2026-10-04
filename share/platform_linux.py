@@ -115,6 +115,132 @@ def battery_facts() -> list[tuple[str, str]]:
     return out
 
 
+# ── подробная батарея для вкладки «Батарея» ──
+POWER_SUPPLY = Path("/sys/class/power_supply")
+
+
+def _ps_read(d: Path, fn: str) -> str:
+    try:
+        return (d / fn).read_text().strip()
+    except OSError:
+        return ""
+
+
+def _ps_num(d: Path, fn: str) -> int | None:
+    try:
+        return int(_ps_read(d, fn))
+    except ValueError:
+        return None
+
+
+def battery_detail(base: Path | None = None) -> dict | None:
+    """Живая батарея из /sys/class/power_supply (см. platforms.py); None — батареи нет.
+
+    Ядро отдаёт микро-единицы: µV, µA, µW, µWh / µAh. Знак тока у разных
+    драйверов разный, поэтому направление берём из status, а не из знака.
+    Банок и потока «блок → система» ядро не отдаёт — эти поля пустые."""
+    base = base or POWER_SUPPLY
+    if not base.is_dir():
+        return None
+    bats, adapters = [], []
+    for d in sorted(base.iterdir()):
+        kind = _ps_read(d, "type")
+        if kind == "Battery" and _ps_read(d, "scope") != "Device":   # мыши и прочие HID — мимо
+            if _ps_read(d, "present") != "0":
+                bats.append(d)
+        elif kind in ("Mains", "USB", "USB_C", "USB_PD", "Wireless"):
+            adapters.append(d)
+    if not bats:
+        return None
+    b = bats[0]
+    raw_status = _ps_read(b, "status").lower()
+    online = [a for a in adapters if _ps_read(a, "online") == "1"]
+    ext = bool(online) or raw_status in ("charging", "full", "not charging")
+    status = {"charging": "charging", "full": "full", "not charging": "idle",
+              "discharging": "discharging"}.get(raw_status, "idle" if ext else "discharging")
+
+    uv, ua, uw = _ps_num(b, "voltage_now"), _ps_num(b, "current_now"), _ps_num(b, "power_now")
+    volt = uv / 1e6 if uv else None
+    cur = abs(ua) / 1e6 if ua is not None else None
+    pwr = abs(uw) / 1e6 if uw is not None else (volt * cur if volt and cur is not None else None)
+    if cur is None and pwr is not None and volt:
+        cur = pwr / volt
+    sign = -1 if status == "discharging" else 1
+    if cur is not None:
+        cur *= sign
+    if pwr is not None:
+        pwr *= sign
+
+    # ёмкость: energy_* (µWh → Вт·ч) или charge_* (µAh → мА·ч)
+    if _ps_num(b, "energy_full") is not None:
+        unit, div, pre = "Вт·ч", 1e6, "energy"
+    else:
+        unit, div, pre = "мА·ч", 1e3, "charge"
+
+    def cap(fn: str) -> float | None:
+        v = _ps_num(b, f"{pre}_{fn}")
+        if not v:
+            return None
+        return round(v / div, 1) if pre == "energy" else int(v / div)
+    now_, full_ = _ps_num(b, f"{pre}_now"), _ps_num(b, f"{pre}_full")
+    rate = _ps_num(b, "power_now" if pre == "energy" else "current_now")
+    rate = abs(rate) if rate else 0
+    time_empty = time_full = None
+    if rate and now_ is not None:
+        if status == "discharging":
+            time_empty = int(now_ * 60 / rate)
+        elif status == "charging" and full_:
+            time_full = int(max(0, full_ - now_) * 60 / rate)
+    tr = _ps_num(b, "time_to_empty_now")
+    if tr and status == "discharging":
+        time_empty = tr // 60
+    tf = _ps_num(b, "time_to_full_now")
+    if tf and status == "charging":
+        time_full = tf // 60
+
+    adapter = None
+    if online:
+        a = online[0]
+        av, aa = _ps_num(a, "voltage_now"), _ps_num(a, "current_now")
+        ap = _ps_num(a, "power_now")
+        adapter = {
+            "watts": round(ap / 1e6) if ap else (round(av * aa / 1e12) if av and aa else None),
+            "voltage": av / 1e6 if av else None, "current": aa / 1e6 if aa else None,
+            "name": a.name, "maker": _ps_read(a, "manufacturer"),
+            "wireless": _ps_read(a, "type") == "Wireless", "family": None,
+            "profiles": [], "active": None,
+        }
+    temp = _ps_num(b, "temp")
+    return {
+        "source": "adapter" if ext else "battery",
+        "status": status,
+        "percent": _ps_num(b, "capacity"),
+        "voltage": volt,
+        "current": cur,
+        "power": pwr,
+        "time_empty": time_empty,
+        "time_full": time_full,
+        "cells": [], "cells_ra": [], "qmax": [],
+        "unit": unit,
+        "cap_now": cap("now"),
+        "cap_full": cap("full"),
+        "cap_nominal": None,
+        "cap_design": cap("full_design"),
+        "cycles": _ps_num(b, "cycle_count") or None,
+        "cycles_design": None,
+        "temp": temp / 10 if temp else None,
+        "lifetime": {},
+        "charger": {},
+        "adapter": adapter,
+        "flow": None,
+        "device": " ".join(x for x in (_ps_read(b, "manufacturer"), _ps_read(b, "model_name"),
+                                       _ps_read(b, "technology")) if x) or b.name,
+        "updated": None,
+        "live": None,
+        "src_note": f"{base}/{b.name}",
+    }
+
+
 # ═══════════════════════════════ сеть ══════════════════════════════════════
 def default_iface() -> tuple[str, str]:
     """(интерфейс, шлюз) маршрута по умолчанию — из `ip route`."""
