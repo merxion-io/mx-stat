@@ -37,7 +37,7 @@ async def main(width: int, height: int, show: bool) -> int:
     app = tui.MxStat()
     async with app.run_test(size=(width, height)) as pilot:
         await asyncio.sleep(4.0)
-        for tab in ("1", "2", "3", "4", "5", "6"):
+        for tab in ("1", "2", "3", "4", "5", "6", "7"):
             await pilot.press(tab)
             await asyncio.sleep(1.2)
             if show:

@@ -6,8 +6,12 @@ lsof, route, scutil, networksetup. Root не нужен. Интерфейс мо
 повторяет platform_linux.py — список функций и их смысл описан в platforms.py."""
 from __future__ import annotations
 
+import ctypes as C
+import ctypes.util
 import platform
+import plistlib
 import re
+import struct
 import threading
 import time
 from collections import Counter
@@ -184,6 +188,310 @@ def battery_facts() -> list[tuple[str, str]]:
     if t:
         out.append(("t° батареи", f"{t / 100:.1f} °C"))
     return out
+
+
+# ── подробная батарея для вкладки «Батарея»: plist из ioreg -a, раз в секунду ──
+NO_TIME = 65535                  # «времени нет» у контроллера (AvgTimeToFull и др.)
+
+
+def _battery_plist() -> dict | None:
+    """Словарь AppleSmartBattery из `ioreg -rn AppleSmartBattery -a` (~30 мс, без кэша)."""
+    out = sh(["ioreg", "-rn", "AppleSmartBattery", "-a"], timeout=4)
+    if not out:
+        return None
+    try:
+        data = plistlib.loads(out.encode())
+    except Exception:
+        return None
+    if isinstance(data, list):
+        data = data[0] if data else None
+    return data if isinstance(data, dict) else None
+
+
+def _signed(v) -> int | None:
+    """Знаковое из беззнакового 64-битного: 2^64−527 → −527. Не число → None."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    v = int(v)
+    return v - (1 << 64) if v >= 1 << 63 else v
+
+
+def _num(d: dict | None, key: str) -> int | None:
+    return _signed(d.get(key)) if isinstance(d, dict) else None
+
+
+def _minutes(v: int | None) -> int | None:
+    return v if v is not None and 0 < v < NO_TIME else None
+
+
+def _adapter(io: dict) -> dict | None:
+    """Блок питания: AdapterDetails (или первый из AppleRawAdapterDetails).
+
+    Без блока macOS оставляет {'FamilyCode': 0} — это «нет адаптера»."""
+    ad = io.get("AdapterDetails")
+    if not isinstance(ad, dict) or not (ad.get("Watts") or ad.get("Name") or ad.get("AdapterVoltage")):
+        raw = io.get("AppleRawAdapterDetails")
+        ad = raw[0] if isinstance(raw, list) and raw and isinstance(raw[0], dict) else None
+    if not ad or not (ad.get("Watts") or ad.get("Name") or ad.get("AdapterVoltage")):
+        return None
+    profiles = []
+    for p in ad.get("UsbHvcMenu") or []:
+        if isinstance(p, dict) and p.get("MaxVoltage"):
+            profiles.append((p["MaxVoltage"] / 1000, (p.get("MaxCurrent") or 0) / 1000))
+    hvc = _num(ad, "UsbHvcHvcIndex")
+    volt, cur = _num(ad, "AdapterVoltage"), _num(ad, "Current")
+    return {
+        "watts": _num(ad, "Watts"),
+        "voltage": volt / 1000 if volt else None,
+        "current": cur / 1000 if cur else None,
+        "name": str(ad.get("Name") or ad.get("Description") or ""),
+        "maker": str(ad.get("Manufacturer") or ""),
+        "wireless": bool(ad.get("IsWireless")),
+        "family": _num(ad, "FamilyCode"),
+        "profiles": profiles,
+        "active": hvc if hvc is not None and 0 <= hvc < len(profiles) else None,
+    }
+
+
+def parse_battery(io: dict | None) -> dict | None:
+    """Свести словарь AppleSmartBattery к общему виду battery_detail().
+
+    Набор ключей зависит от модели (Intel-контроллер bq20z451, Apple Silicon
+    и т. д.), поэтому всё, чего нет, — None, а не ноль."""
+    if not io or io.get("BatteryInstalled") is False:
+        return None
+    bd = io.get("BatteryData") if isinstance(io.get("BatteryData"), dict) else {}
+    ch = io.get("ChargerData") if isinstance(io.get("ChargerData"), dict) else {}
+    pt = io.get("PowerTelemetryData") if isinstance(io.get("PowerTelemetryData"), dict) else {}
+    life = bd.get("LifetimeData") if isinstance(bd.get("LifetimeData"), dict) else {}
+
+    volt = _num(io, "Voltage") or _num(io, "AppleRawBatteryVoltage") or _num(bd, "Voltage")
+    amp = _num(io, "InstantAmperage")
+    if amp is None:
+        amp = _num(io, "Amperage")
+    ext = bool(io.get("ExternalConnected"))
+    charging = bool(io.get("IsCharging"))
+    full = bool(io.get("FullyCharged"))
+    if charging:
+        status = "charging"
+    elif full and ext:
+        status = "full"
+    elif ext:
+        status = "idle"                          # на блоке, но не заряжается
+    else:
+        status = "discharging"
+
+    cells = [c / 1000 for c in (bd.get("CellVoltage") or []) if isinstance(c, int) and c > 0]
+    ra = [r for r in (bd.get("WeightedRa") or []) if isinstance(r, int) and r > 0]
+    qmax = [q for q in (bd.get("Qmax") or []) if isinstance(q, int) and q > 0]
+
+    # поток мощности (мВт): от блока, потребление системы, батарея (+ заряд / − разряд)
+    flow = None
+    if pt:
+        def w(key: str) -> float | None:
+            v = _num(pt, key)
+            return v / 1000 if v is not None else None
+        sv, sc = _num(pt, "SystemVoltageIn"), _num(pt, "SystemCurrentIn")
+        flow = {"in": w("SystemPowerIn"), "load": w("SystemLoad"), "batt": w("BatteryPower"),
+                "loss": w("AdapterEfficiencyLoss"), "wall": w("WallEnergyEstimate"),
+                "in_v": sv / 1000 if sv else None, "in_a": sc / 1000 if sc else None}
+    elif isinstance(bd.get("SystemPower"), (int, float)):
+        flow = {"in": None, "load": float(bd["SystemPower"]), "batt": None, "loss": None,
+                "wall": None, "in_v": None, "in_a": None}
+
+    temp = _num(io, "Temperature")
+    t_life = {k: (_num(life, k) / 10 if _num(life, k) is not None else None)
+              for k in ("MinimumTemperature", "MaximumTemperature", "AverageTemperature")}
+    lv = {k: _num(life, k) for k in ("MinimumPackVoltage", "MaximumPackVoltage",
+                                     "MaximumChargeCurrent", "MaximumDischargeCurrent")}
+    lifetime = {
+        "v_min": lv["MinimumPackVoltage"] / 1000 if lv["MinimumPackVoltage"] else None,
+        "v_max": lv["MaximumPackVoltage"] / 1000 if lv["MaximumPackVoltage"] else None,
+        "i_chg_max": lv["MaximumChargeCurrent"] / 1000 if lv["MaximumChargeCurrent"] else None,
+        "i_dis_max": lv["MaximumDischargeCurrent"] / 1000 if lv["MaximumDischargeCurrent"] else None,
+        "t_min": t_life["MinimumTemperature"], "t_max": t_life["MaximumTemperature"],
+        "t_avg": t_life["AverageTemperature"],
+        "hours": _num(life, "TotalOperatingTime"),
+    } if life else {}
+
+    cv, cc = _num(ch, "ChargingVoltage"), _num(ch, "ChargingCurrent")
+    charger = {
+        "voltage": cv / 1000 if cv else None,
+        "current": cc / 1000 if cc is not None else None,
+        "not_charging": _num(ch, "NotChargingReason"),
+        "slow": _num(ch, "SlowChargingReason"),
+        "vac_limit": (_num(ch, "VacVoltageLimit") or 0) / 1000 or None,
+    } if ch else {}
+
+    batt_w = flow["batt"] if flow and flow.get("batt") is not None else (
+        volt * amp / 1e6 if volt and amp is not None else None)
+    return {
+        "source": "adapter" if ext else "battery",
+        "status": status,
+        "percent": _num(io, "CurrentCapacity"),
+        "voltage": volt / 1000 if volt else None,
+        "current": amp / 1000 if amp is not None else None,
+        "power": batt_w,
+        "time_empty": None if ext else _minutes(_num(io, "TimeRemaining") or _num(io, "AvgTimeToEmpty")),
+        "time_full": _minutes(_num(io, "AvgTimeToFull")) if charging else None,
+        "cells": cells,
+        "cells_ra": ra,
+        "qmax": qmax,
+        "unit": "мА·ч",
+        "cap_now": _num(io, "AppleRawCurrentCapacity"),
+        "cap_full": _num(io, "AppleRawMaxCapacity"),
+        "cap_nominal": _num(io, "NominalChargeCapacity"),
+        "cap_design": _num(io, "DesignCapacity") or _num(bd, "DesignCapacity"),
+        "cycles": _num(io, "CycleCount"),
+        "cycles_design": _num(io, "DesignCycleCount9C"),
+        "temp": temp / 100 if temp else None,
+        "lifetime": lifetime,
+        "charger": charger,
+        "adapter": _adapter(io) if ext else None,
+        "flow": flow,
+        "device": str(io.get("DeviceName") or ""),
+        "updated": _num(io, "UpdateTime"),       # когда контроллер сам обновил цифры (epoch)
+        "src_note": "ioreg AppleSmartBattery",
+    }
+
+
+class _SMCVers(C.Structure):
+    _fields_ = [("major", C.c_uint8), ("minor", C.c_uint8), ("build", C.c_uint8),
+                ("reserved", C.c_uint8), ("release", C.c_uint16)]
+
+
+class _SMCPLimit(C.Structure):
+    _fields_ = [("version", C.c_uint16), ("length", C.c_uint16), ("cpu", C.c_uint32),
+                ("gpu", C.c_uint32), ("mem", C.c_uint32)]
+
+
+class _SMCInfo(C.Structure):
+    _fields_ = [("size", C.c_uint32), ("type", C.c_uint32), ("attr", C.c_uint8)]
+
+
+class _SMCData(C.Structure):
+    """SMCKeyData_t из AppleSMC — та же раскладка, что у smcFanControl / Stats (80 байт)."""
+    _fields_ = [("key", C.c_uint32), ("vers", _SMCVers), ("plimit", _SMCPLimit),
+                ("info", _SMCInfo), ("result", C.c_uint8), ("status", C.c_uint8),
+                ("cmd", C.c_uint8), ("data32", C.c_uint32), ("bytes", C.c_uint8 * 32)]
+
+
+class _SMC:
+    """Чтение ключей SMC через IOKit (AppleSMC) — без root, только чтение.
+
+    Зачем: AppleSmartBattery в ioreg обновляется контроллером раз в ~60 с,
+    а SMC отдаёт мощность системы, вход от блока, напряжение и ток батареи
+    каждую секунду."""
+
+    def __init__(self) -> None:
+        self.conn = None
+        self.lock = threading.Lock()
+        self.failed = False
+
+    def _open(self) -> bool:
+        if self.conn is not None or self.failed:
+            return self.conn is not None
+        try:
+            iokit = C.cdll.LoadLibrary(ctypes.util.find_library("IOKit"))
+            libc = C.cdll.LoadLibrary(ctypes.util.find_library("c"))
+            iokit.IOServiceMatching.restype = C.c_void_p
+            iokit.IOServiceMatching.argtypes = [C.c_char_p]
+            iokit.IOServiceGetMatchingService.restype = C.c_uint32
+            iokit.IOServiceGetMatchingService.argtypes = [C.c_uint32, C.c_void_p]
+            iokit.IOServiceOpen.argtypes = [C.c_uint32, C.c_uint32, C.c_uint32,
+                                            C.POINTER(C.c_uint32)]
+            iokit.IOConnectCallStructMethod.argtypes = [C.c_uint32, C.c_uint32, C.c_void_p,
+                                                        C.c_size_t, C.c_void_p,
+                                                        C.POINTER(C.c_size_t)]
+            svc = iokit.IOServiceGetMatchingService(0, iokit.IOServiceMatching(b"AppleSMC"))
+            conn = C.c_uint32()
+            task = C.c_uint32.in_dll(libc, "mach_task_self_").value
+            if not svc or iokit.IOServiceOpen(svc, task, 0, C.byref(conn)) != 0:
+                raise OSError("AppleSMC не открылся")
+            self.iokit, self.conn = iokit, conn.value
+        except Exception:
+            self.failed = True
+        return self.conn is not None
+
+    def _call(self, inp):
+        out = _SMCData()
+        size = C.c_size_t(C.sizeof(_SMCData))
+        rc = self.iokit.IOConnectCallStructMethod(self.conn, 2, C.byref(inp), C.sizeof(_SMCData),
+                                                  C.byref(out), C.byref(size))
+        return out if rc == 0 and out.result == 0 else None
+
+    def read(self, key: str):
+        """(тип, сырые байты) ключа или None."""
+        with self.lock:
+            if not self._open():
+                return None
+            k = int.from_bytes(key.encode(), "big")
+            q = _SMCData(key=k, cmd=9)                 # 9 — узнать размер и тип
+            info = self._call(q)
+            if info is None or not info.info.size:
+                return None
+            q = _SMCData(key=k, cmd=5)                 # 5 — прочитать значение
+            q.info.size = info.info.size
+            val = self._call(q)
+            if val is None:
+                return None
+            typ = info.info.type.to_bytes(4, "big").decode("latin-1")
+            return typ, bytes(val.bytes[:info.info.size])
+
+
+_SMC_DEV = _SMC()
+
+
+def _smc_float(key: str) -> float | None:
+    r = _SMC_DEV.read(key)
+    if r and r[0] == "flt " and len(r[1]) == 4:
+        v = struct.unpack("<f", r[1])[0]
+        return v if v == v and abs(v) < 1e4 else None     # NaN и мусор — мимо
+    return None
+
+
+def _smc_int(key: str, order: str) -> int | None:
+    r = _SMC_DEV.read(key)
+    if r and r[0] in ("si16", "ui16") and len(r[1]) == 2:
+        return int.from_bytes(r[1], order, signed=r[0] == "si16")
+    return None
+
+
+def smc_live(ref: dict | None = None) -> dict | None:
+    """Посекундные цифры SMC: {sys, in Вт, volt В, amp А} (чего нет — None).
+
+    Порядок байт целых ключей у Apple Silicon и Intel разный, поэтому ток
+    B0AC берём, только если B0AV в том же порядке совпал с напряжением
+    батареи (SBAV или ioreg) — иначе цифре нельзя верить."""
+    if _SMC_DEV.failed:
+        return None
+    sys_w, in_w, volt = _smc_float("PSTR"), _smc_float("PDTR"), _smc_float("SBAV")
+    ref_v = volt or (ref or {}).get("voltage")
+    amp = None
+    if ref_v:
+        for order in (("little", "big") if platform.machine() == "arm64" else ("big", "little")):
+            mv = _smc_int("B0AV", order)
+            if mv and abs(mv / 1000 - ref_v) < 0.5:
+                ma = _smc_int("B0AC", order)
+                if ma is not None and abs(ma) < 15000:
+                    amp = ma / 1000
+                    volt = volt or mv / 1000
+                break
+    if sys_w is None and in_w is None and volt is None and amp is None:
+        return None
+    return {"sys": sys_w, "in": in_w if in_w is None or in_w > 0.05 else 0.0,
+            "volt": volt, "amp": amp}
+
+
+def battery_detail() -> dict | None:
+    """Подробная живая батарея (см. platforms.py); None — батареи нет."""
+    d = parse_battery(_battery_plist())
+    if d is not None:
+        try:
+            d["live"] = smc_live(d)
+        except Exception:
+            d["live"] = None
+    return d
 
 
 # ═══════════════════════════════ сеть ══════════════════════════════════════

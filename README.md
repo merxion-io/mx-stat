@@ -66,8 +66,9 @@ Headless check (clicks through every tab, no terminal needed):
 | **1 Overview** — ⚡ POWER card | Live draw per node: CPU (RAPL counters), each GPU (nvidia-smi), integrated graphics (hwmon), total and a ~3 minute graph. Disks, RAM, board and PSU are not measured — no sensors exist |
 | **1 Overview** — 🌡 TEMPERATURE card | Every sensor: CPU and its dies (k10temp), each GPU, integrated graphics, network chip; hottest node and a ~3 minute graph. Disk temperatures would need smartctl — not used |
 | **6 GPU** | NVIDIA cards: utilisation and VRAM with history, temperature, fan, power and clocks; table of processes holding VRAM |
+| **7 Battery** | Live power once a second: source (adapter / battery), big charge %, status and time to full / to empty; power flow "adapter → system / battery" (watts from the adapter, system draw, battery charge/discharge, adapter losses); voltage and current; cells with bars, spread in mV and resistance; power adapter (wattage, USB-PD voltage/current, profiles); health (cycles, capacity now / design, temperature, lifetime extremes); graphs for the last minutes. No battery — "no battery" |
 
-Keys: `1`–`6` tabs · `p` pause · `s` sort · `f` claude filter · `r` refresh ·
+Keys: `1`–`7` tabs · `p` pause · `s` sort · `f` claude filter · `r` refresh ·
 `+`/`-` interval (0.5–10 s) · `q` quit.
 
 ## Where the agent data comes from
@@ -135,7 +136,9 @@ Read straight from the kernel; no daemons required:
 - **Power** — RAPL counters in `/sys/class/powercap`: watts are the microjoule delta between
   polls. Disks, RAM, board and PSU are not measured — no sensors.
 - **Temperatures** — `/sys/class/hwmon` (CPU via k10temp), GPUs via `nvidia-smi`.
-- **Battery** — cycles and health from `/sys/class/power_supply`, when the kernel exposes them.
+- **Battery** — cycles and health from `/sys/class/power_supply`, when the kernel exposes them;
+  tab 7 takes voltage, current, power, capacity, status and the adapter from there too (the
+  kernel exposes neither cells nor the "adapter → system" flow).
 - **Network** — default route via `ip -4 route show default`, DNS from `/etc/resolv.conf`,
   Wi-Fi via `nmcli`, TCP sockets and listening ports via `psutil`.
 - **Containers** — `podman ps`, falling back to `docker ps`; with neither installed the card
@@ -160,6 +163,13 @@ Stock tools only, no root and no extra packages:
   (`AppleRawMaxCapacity / DesignCapacity`), battery temperature, and whole-machine draw from
   `PowerTelemetryData.SystemLoad`. Per-component CPU/GPU power and SoC temperatures need root
   (`powermetrics`), so they are not shown; the temperature card shows the battery.
+- **Tab 7 "Battery"** — `ioreg -rn AppleSmartBattery -a` (plist) once a second: cells
+  (`BatteryData.CellVoltage`, `WeightedRa`, `Qmax`), `ChargerData`, `AdapterDetails` with USB-PD
+  profiles, `PowerTelemetryData` (adapter in, system, battery, adapter losses), `LifetimeData`.
+  The battery gauge itself refreshes these only every ~60 s, so system power, adapter input,
+  battery voltage and current also come from the SMC (keys `PSTR`, `PDTR`, `SBAV`,
+  `B0AV`/`B0AC`) via IOKit — read-only, no root. The SMC current is used only when the voltage
+  read with the same byte order matches the battery; without the SMC the gauge figures remain.
 - **Network** — `route -n get default`, DNS from `scutil --dns`, Wi-Fi via `networksetup`
   (recent macOS hides the SSID without location access). Byte counters come from
   `netstat -ib`, read from the end of the line, because psutil returns truncated counters on
@@ -176,7 +186,7 @@ share/platforms.py  picks the platform layer by sys.platform (the only OS switch
 share/platform_linux.py   system data on Linux (/proc, /sys, ip, nmcli, RAPL)
 share/platform_macos.py   system data on macOS (sysctl, ioreg, netstat, lsof, scutil)
 share/platform_common.py  helpers shared by both layers
-share/tui.py        Textual app: 6 tabs, adaptive columns, live updates
+share/tui.py        Textual app: 7 tabs, adaptive columns, live updates
 share/snapshot.py   the mx stat -s / -w mode
 share/mxstat.py     entry point (the launcher invokes it through the venv)
 bin/mx              example shell launcher (install.sh writes its own with absolute paths)
