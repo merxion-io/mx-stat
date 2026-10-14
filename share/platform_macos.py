@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# SPDX-License-Identifier: AGPL-3.0-only
 """Merxion Stat · платформенный слой macOS.
 
 Данные берутся из psutil и штатных утилит: sysctl, ioreg, vm_stat, netstat,

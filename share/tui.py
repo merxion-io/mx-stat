@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Merxion Stat · tui — полноэкранный live-монитор системы и AI-агентов (Textual)."""
 from __future__ import annotations
 
@@ -1701,7 +1702,7 @@ class MxStat(App):
 
         pt = self.query_one("#t-ports", DataTable)
         pt.clear()
-        known = {8787: "assistant", 5000: "AirPlay", 7000: "AirPlay", 21118: "RustDesk",
+        known = {5000: "AirPlay", 7000: "AirPlay", 21118: "RustDesk",
                  22: "ssh", 80: "http", 443: "https", 5432: "postgres", 6379: "redis",
                  3000: "dev-сервер", 8080: "http-alt", 11434: "ollama"}
         for port, host, name, pid, hint in s.ports:

@@ -1,6 +1,6 @@
 # mx-stat — system & AI agent monitor
 
-[Русская версия](README.ru.md) · MIT · Linux · macOS · Python 3.11+
+[Русская версия](README.ru.md) · AGPL-3.0 · Linux · macOS · Python 3.11+
 
 A full-screen terminal monitor (Textual, tokyo-night theme). Beyond the usual `htop` view
 it shows **live coding-agent sessions**: what each one is working on, which model, how much
@@ -20,9 +20,11 @@ Adding a provider is one function in `share/core.py` — see `_codex_agents` /
 `_opencode_agents` for the shape.
 
 ```
-█▀▄▀█ █▀▀ █▀█ ▀▄▀ █ █▀█ █▄ █  │ AMD Ryzen 9 · Fedora 42 · ↑ 9d 21h · Tue 08.09  11:42:21
+█▀▄▀█ █▀▀ █▀█ ▀▄▀ █ █▀█ █▄ █  │ Intel Core i7 · Ubuntu 24.04 · ↑ 9d 21h · Tue 08.09  11:42:21
 █ ▀ █ ██▄ █▀▄ ▄▀▄ █ █▄█ █ ▀█  │ CPU 24.3%  RAM 68%  load 2.49  ↓ 10 KB/s  ↑ 220 KB/s  🤖 5 busy 3 · 1s  ·  Stat
 ```
+
+![mx stat, Overview tab](docs/screenshot.svg)
 
 > **Note:** the interface is currently in Russian. Documentation is bilingual; UI
 > localisation is not done yet — contributions welcome.
@@ -43,16 +45,19 @@ mx stat -s         # one static snapshot (good for pipes / screenshots)
 
 `mx` is a thin wrapper — right now it knows a single subcommand, `stat`.
 
-Earlier installs (`~/.local/share/hstat`, `~/.local/share/MerxionStat`) are never deleted:
-`install.sh` moves them to `~/.local/share/<name>.bak-<date>` (the old `hstat` launcher goes
-to `~/.local/share/hstat-launcher.bak-<date>/`) and writes `~/.local/bin/hstat` as a
-compatibility alias for `mx stat`. The script runs on stock macOS bash 3.2 and BSD tools.
+The script runs on stock macOS bash 3.2 and BSD tools.
 
-Headless check (clicks through every tab, no terminal needed):
+## Tests
+
+There is no CI; run the checks locally with the installed venv and the source tree:
 
 ```sh
-~/.local/share/mx-stat/venv/bin/python tests/smoke_test.py 140 46 --show
+MXSTAT_HOME=$PWD/share ~/.local/share/mx-stat/venv/bin/python tests/battery_test.py       # battery parsing, no hardware needed
+MXSTAT_HOME=$PWD/share ~/.local/share/mx-stat/venv/bin/python tests/smoke_test.py 140 46  # headless: clicks through every tab
 ```
+
+Add `--show` to the smoke test to print a text dump of each tab (it shows your own machine's data).
+Both exit with code 0 on success.
 
 ## What's inside
 
@@ -194,12 +199,17 @@ install.sh          installation
 requirements.txt    textual==8.2.8 · psutil==7.2.2 · rich==15.0.0
 tests/smoke_test.py headless check via Textual Pilot
 CLAUDE-INSTALL.md   instructions for Claude Code on a fresh machine
+VERSION / CHANGELOG.md / SECURITY.md   release metadata and security policy
+docs/screenshot.svg   README screenshot
 ```
 
 Logo and palette are the `LOGO`, `BRAND`, `WHITE` constants at the top of `core.py`.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Licensed under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0-only).
 
 © 2026 Merxion Solution S.R.L.
+
+**Trademark.** The name and logo MERXION are trademarks of Merxion Solution S.R.L.
+The licence does not grant any rights to them; forks must use a different name and logo.

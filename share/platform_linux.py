@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# SPDX-License-Identifier: AGPL-3.0-only
 """Merxion Stat · платформенный слой Linux.
 
 Данные берутся из psutil, /proc, /sys/class/*, /etc и утилит ip / nmcli /

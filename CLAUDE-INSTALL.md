@@ -14,9 +14,6 @@ Your job: install it, verify it, and tell the user how to run it.
    `python3 -m venv`), installs `textual`, `psutil`, `rich` from `requirements.txt` and
    writes a launcher at `~/.local/bin/mx`. Requires Python 3.11+; if it is missing but `uv`
    is present, uv will fetch a suitable Python itself.
-   If an earlier version is installed under the names `hstat` or `MerxionStat`, `install.sh`
-   moves it to a backup (`~/.local/share/<name>.bak-<date>`, nothing is deleted) and writes
-   `~/.local/bin/hstat` as an alias for `mx stat`.
 
 2. **Check PATH.** If `install.sh` warned that `~/.local/bin` is not on PATH:
    ```sh
@@ -63,7 +60,6 @@ Your job: install it, verify it, and tell the user how to run it.
 ~/.local/share/mx-stat/mxstat.py   entry point
 ~/.local/share/mx-stat/core.py     agents + SessionTracker + logo (LOGO/BRAND/WHITE)
 ~/.local/share/mx-stat/platform_*.py  system data per OS (picked in platforms.py)
-~/.local/bin/hstat                 compatibility alias for `mx stat`
 ~/.local/share/mx-stat/tui.py      Textual application
 ~/.local/share/mx-stat/snapshot.py the -s mode
 ~/.local/share/mx-stat/venv/       environment

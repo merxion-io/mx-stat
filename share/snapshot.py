@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Merxion Stat · snapshot — одноразовый статичный вывод (mx stat -s) и простой watch."""
 import os
 import sys

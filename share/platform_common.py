@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Merxion Stat · общие мелочи платформенного слоя (без rich и без core)."""
 from __future__ import annotations
 

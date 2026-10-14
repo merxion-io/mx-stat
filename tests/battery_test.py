@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Проверка разбора батареи без железа: фикстуры AppleSmartBattery (macOS) и sysfs (Linux).
 
     ~/.local/share/mx-stat/venv/bin/python tests/battery_test.py

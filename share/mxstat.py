@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Merxion Stat — live-монитор системы и AI-агентов Claude Code (MERXION).
 
   mx stat              полноэкранный TUI (по умолчанию)

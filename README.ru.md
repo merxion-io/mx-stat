@@ -1,6 +1,6 @@
 # mx-stat — монитор системы и AI-агентов
 
-[English version](README.md) · MIT · Linux · macOS · Python 3.11+
+[English version](README.md) · AGPL-3.0 · Linux · macOS · Python 3.11+
 
 Полноэкранный live-монитор в терминале (Textual, тема tokyo-night) с белым логотипом
 MERXION в шапке. Кроме обычного «htop» показывает **живые сессии кодовых агентов**: что за
@@ -20,9 +20,11 @@ MERXION в шапке. Кроме обычного «htop» показывает
 `_opencode_agents`.
 
 ```
-█▀▄▀█ █▀▀ █▀█ ▀▄▀ █ █▀█ █▄ █  │ AMD Ryzen 9 · Fedora 42 · ↑ 9д 21ч · Tue 08.09  11:42:21
+█▀▄▀█ █▀▀ █▀█ ▀▄▀ █ █▀█ █▄ █  │ Intel Core i7 · Ubuntu 24.04 · ↑ 9д 21ч · Tue 08.09  11:42:21
 █ ▀ █ ██▄ █▀▄ ▄▀▄ █ █▄█ █ ▀█  │ CPU 24.3%  RAM 68%  load 2.49  ↓ 10 KB/с  ↑ 220 KB/с  🤖 5 busy 3 · 1с  ·  Stat
 ```
+
+![mx stat, вкладка «Обзор»](docs/screenshot.svg)
 
 ## Установка
 
@@ -38,16 +40,19 @@ mx stat -s         # статичный снимок (для пайпов / ск
 Нужен Python 3.11+. Пути переопределяются переменными `MXSTAT_HOME` и `MXSTAT_BIN`.
 Команда `mx` — тонкая обёртка: сейчас она знает единственную подкоманду `stat`.
 
-Прежние установки (`~/.local/share/hstat`, `~/.local/share/MerxionStat`) не удаляются:
-`install.sh` переносит их в `~/.local/share/<имя>.bak-<дата>` (старый лаунчер `hstat` —
-в `~/.local/share/hstat-launcher.bak-<дата>/`) и пишет `~/.local/bin/hstat` как совместимый
-алиас на `mx stat`. Скрипт работает на штатном bash 3.2 и BSD-утилитах macOS.
+Скрипт работает на штатном bash 3.2 и BSD-утилитах macOS.
 
-Проверка без терминала (headless, прощёлкивает все вкладки):
+## Тесты
+
+CI нет; проверки запускаются локально установленным venv и исходниками:
 
 ```sh
-~/.local/share/mx-stat/venv/bin/python tests/smoke_test.py 140 46 --show
+MXSTAT_HOME=$PWD/share ~/.local/share/mx-stat/venv/bin/python tests/battery_test.py       # разбор батареи, железо не нужно
+MXSTAT_HOME=$PWD/share ~/.local/share/mx-stat/venv/bin/python tests/smoke_test.py 140 46  # headless: прощёлкивает все вкладки
 ```
+
+С флагом `--show` смоук печатает текстовый слепок каждой вкладки (там данные вашей машины).
+Код выхода 0 — всё в порядке.
 
 ## Что внутри
 
@@ -188,12 +193,17 @@ install.sh         установка
 requirements.txt   textual==8.2.8 · psutil==7.2.2 · rich==15.0.0
 tests/smoke_test.py headless-проверка через Textual Pilot
 CLAUDE-INSTALL.md  инструкция для Claude Code на новой машине
+VERSION / CHANGELOG.md / SECURITY.md   версия, журнал изменений, политика безопасности
+docs/screenshot.svg   скриншот для README
 ```
 
 Логотип и палитра — константы `LOGO`, `BRAND`, `WHITE` в начале `core.py`.
 
 ## Лицензия
 
-MIT — см. [LICENSE](LICENSE).
+Лицензия [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0-only).
 
 © 2026 Merxion Solution S.R.L.
+
+**Товарный знак.** Название и логотип MERXION — товарные знаки Merxion Solution S.R.L.
+Лицензия не передаёт прав на них; форки должны использовать другое название и логотип.

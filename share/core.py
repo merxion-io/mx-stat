@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# SPDX-License-Identifier: AGPL-3.0-only
 """Merxion Stat · core — сбор системных данных и статичная отрисовка через rich.
 
 Общая база для снапшота (mx stat -s) и полноэкранного TUI (mx stat).

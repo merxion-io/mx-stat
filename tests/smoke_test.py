@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Headless-проверка Merxion Stat: запускает TUI без терминала, прощёлкивает вкладки и клавиши.
 
     ~/.local/share/mx-stat/venv/bin/python tests/smoke_test.py [ширина] [высота] [--show]
